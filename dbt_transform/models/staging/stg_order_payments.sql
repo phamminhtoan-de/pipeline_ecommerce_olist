@@ -1,7 +1,10 @@
 {{ config(
     materialized='incremental',
     unique_key=['order_id', 'payment_sequential'],
-    incremental_strategy='delete+insert'
+    incremental_strategy='merge',
+    indexes=[
+        {'columns': ['order_id', 'payment_sequential'], 'unique': True}
+    ]
 ) }}
 
 with source as (
