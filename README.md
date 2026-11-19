@@ -159,7 +159,10 @@ etl_ecommerce_data/
 │       └── validate_target.py        # Kiểm toán số dòng Bronze đối chiếu với baseline nguồn
 │
 ├── tests/                            # Bộ kiểm thử đơn vị Python (Unit Test Suite)
-│   └── test_unit_pipeline.py         # Test Schema Contract, Dynamic Query Builders, Checkpoint logic
+│   ├── test_schema_contract.py       # Test Schema Contract & kiểu dữ liệu Evolution
+│   ├── test_extract_query.py         # Test sinh SQL động (Watermark, Resume, Timezone)
+│   ├── test_state_and_alert.py       # Test cấu hình Checkpoint & Webhook Alert guard
+│   └── test_airflow_orchestration.py # Test cấu trúc DAG Airflow & cờ --preflight
 │
 └── dbt_transform/                    # Dự án dbt Core mô hình hóa dữ liệu (Silver & Gold)
     ├── dbt_project.yml               # Cấu hình dự án dbt, chỉ định schema silver và gold
