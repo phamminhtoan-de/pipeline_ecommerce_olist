@@ -6,13 +6,9 @@ from src.config.settings import (
 )
 from src.core.connection import get_target_engine
 from src.core.logger import get_logger
+from src.validate.validate_source import parse_sql_statements
 
 logger = get_logger(__name__)
-
-
-def _parse_sql_statements(sql_text):
-    lines = [line for line in sql_text.splitlines() if not line.strip().startswith("--")]
-    return [s.strip() for s in "\n".join(lines).split(";") if s.strip()]
 
 
 def validate_staging_against_baseline(
@@ -30,7 +26,7 @@ def validate_staging_against_baseline(
         raise FileNotFoundError(f"Không tìm thấy file SQL kiểm định Staging: {VALIDATE_SQL_PATH_STAGING}")
 
     content = VALIDATE_SQL_PATH_STAGING.read_text(encoding="utf-8").replace("{schema}", tgt_schema)
-    statements = _parse_sql_statements(content)
+    statements = parse_sql_statements(content)
 
     stg_row_counts = {}
     stg_pk_issues = []

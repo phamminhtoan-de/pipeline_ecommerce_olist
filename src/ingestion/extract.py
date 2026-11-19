@@ -1,9 +1,10 @@
 from pathlib import Path
 import time
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import pandas as pd
 from sqlalchemy import inspect, text
-from src.config.settings import BASE_DIR, EXTRACT_PIPELINE_RULES, OLIST_7_TABLES
+from src.config.settings import BASE_DIR, EXTRACT_PIPELINE_RULES, OLIST_7_TABLES, SRC_DB_TIMEZONE
 from src.core.connection import get_source_engine
 from src.core.logger import get_logger
 from src.schema.contract import (
@@ -13,6 +14,19 @@ from src.schema.contract import (
 )
 
 logger = get_logger(__name__)
+
+
+def _format_batch_cutoff(batch_time):
+    if isinstance(batch_time, datetime):
+        if batch_time.tzinfo is not None:
+            try:
+                target_tz = ZoneInfo(SRC_DB_TIMEZONE)
+            except ZoneInfoNotFoundError:
+                logger.warning(f"[TIMEZONE] SRC_DB_TIMEZONE='{SRC_DB_TIMEZONE}' không hợp lệ -> fallback về UTC.")
+                target_tz = timezone.utc
+            batch_time = batch_time.astimezone(target_tz)
+        return batch_time.strftime("%Y-%m-%d %H:%M:%S")
+    return str(batch_time)[:19]
 
 
 def resolve_table_name(db_tables, candidates):
@@ -57,7 +71,7 @@ def build_dynamic_query(
     where_filter = ""
     cutoff_filter = ""
     if batch_time and col:
-        cutoff = batch_time.strftime("%Y-%m-%d %H:%M:%S") if isinstance(batch_time, datetime) else str(batch_time)[:19]
+        cutoff = _format_batch_cutoff(batch_time)
         cutoff_filter = f" AND [{col}] <= '{cutoff}'"
 
     if strategy == "full":
@@ -80,7 +94,8 @@ def build_dynamic_query(
             )
             return None
 
-        where_filter = f"[{col}] > '{mark}'{cutoff_filter}"
+        op = ">=" if rule.get("resume_in_progress") else ">"
+        where_filter = f"[{col}] {op} '{mark}'{cutoff_filter}"
         logger.info(f"[{logical_name}] Chế độ trích xuất: WATERMARK ({where_filter})")
 
     elif strategy == "lookback_window":
@@ -110,7 +125,6 @@ def build_dynamic_query(
         try:
             dt = datetime.fromisoformat(str(mark)[:19])
             adjusted_mark = (dt - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
-            rule["adjusted_mark"] = adjusted_mark
             where_filter = f"[{col}] > '{adjusted_mark}'{cutoff_filter}"
             logger.info(f"[{logical_name}] Chế độ trích xuất: LOOKBACK ({where_filter})")
         except Exception as e:
@@ -143,7 +157,11 @@ def build_dynamic_query(
         base_query = f"{base_query} WHERE {where_filter}"
 
     if include_order_by and strategy in ("watermark", "lookback_window", "date_range") and col:
-        base_query = f"{base_query} ORDER BY [{col}] ASC"
+        order_cols = [f"[{col}] ASC"]
+        for pk in (rule.get("primary_keys") or []):
+            if pk != col and (not resolved_columns or pk in resolved_columns):
+                order_cols.append(f"[{pk}] ASC")
+        base_query = f"{base_query} ORDER BY {', '.join(order_cols)}"
 
     return base_query
 
@@ -168,10 +186,16 @@ def extract_table(logical_name, sql_table_name, rule, engine, batch_time, batch_
     col_count = 0
     extract_duration = 0.0
 
+    extracted_at_val = (
+        batch_time.astimezone(timezone.utc).replace(tzinfo=None)
+        if isinstance(batch_time, datetime) and batch_time.tzinfo is not None
+        else batch_time
+    )
+
     try:
         with engine.connect().execution_options(stream_results=True) as conn:
             try:
-                conn.execute(text("SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;"))
+                conn.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED;"))
             except Exception:
                 pass
             reader = pd.read_sql(query, conn, chunksize=chunksize, dtype_backend="numpy_nullable")
@@ -188,7 +212,7 @@ def extract_table(logical_name, sql_table_name, rule, engine, batch_time, batch_
                 col_count = len(chunk.columns)
 
                 chunk = chunk.copy()
-                chunk["_extracted_at"] = batch_time
+                chunk["_extracted_at"] = extracted_at_val
                 chunk["_batch_id"] = batch_id
 
                 logger.debug(f"[EXTRACT] Chunk #{chunk_idx} '{logical_name}': {len(chunk):,} dòng")
@@ -207,13 +231,20 @@ def extract_table(logical_name, sql_table_name, rule, engine, batch_time, batch_
     )
 
 
-def extract_from_sqlserver(schema="dbo", batch_time=None, watermark_states=None, source_baseline=None):
+def extract_from_sqlserver(
+    schema="dbo",
+    batch_time=None,
+    watermark_states=None,
+    source_baseline=None,
+    in_progress_tables=None,
+):
     total_start = time.time()
     if batch_time is None:
         batch_time = datetime.now(timezone.utc)
     batch_id = batch_time.strftime("%Y%m%d_%H%M%S")
     watermark_states = watermark_states or {}
     source_baseline = source_baseline or {}
+    in_progress_set = in_progress_tables or set()
 
     logger.info(f"=== BẮT ĐẦU EXTRACT LINH HOẠT TỪ SOURCE - BATCH: {batch_id} ===")
 
@@ -221,7 +252,9 @@ def extract_from_sqlserver(schema="dbo", batch_time=None, watermark_states=None,
     inspector = None
     existing_tables = None
 
-    for logical_name, rule in EXTRACT_PIPELINE_RULES.items():
+    for logical_name, rule_template in EXTRACT_PIPELINE_RULES.items():
+        rule = dict(rule_template)
+        rule["resume_in_progress"] = logical_name in in_progress_set
         if logical_name in source_baseline:
             base_info = source_baseline[logical_name]
             actual_name = base_info["actual_table_name"]

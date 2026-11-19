@@ -4,7 +4,11 @@ import time
 import pandas as pd
 from sqlalchemy import text
 from src.state.watermark import get_watermark_states, upsert_watermark_state
-from src.state.state_manager import record_chunk_checkpoint_in_tx
+from src.state.state_manager import (
+    init_checkpoint_manager,
+    record_chunk_checkpoint_in_tx,
+    reset_table_checkpoint_for_new_batch,
+)
 from src.config.settings import STAGING_DDL_SQL_PATH, TGT_DB_SCHEMA
 from src.core.logger import get_logger
 from src.schema.evolution import sync_target_schema_evolution
@@ -99,18 +103,15 @@ def stream_load_table_to_postgres(
     else:
         batch_idx = 0
         last_checkpoint_wm = None
-        adjusted_mark = rule.get("adjusted_mark")
-        if norm_strategy == "lookback_window" and watermark_column and adjusted_mark:
-            with tgt_engine.begin() as conn:
-                deleted_rows = conn.execute(
-                    text(f'DELETE FROM "{tgt_schema}"."{table_name}" WHERE "{watermark_column}" > :mark'),
-                    {"mark": adjusted_mark},
-                ).rowcount
-                if deleted_rows:
-                    logger.info(
-                        f"[LOOKBACK CLEANUP] Đã dọn dẹp {deleted_rows:,} dòng chồng lấn trong cửa sổ lookback "
-                        f"({watermark_column} > {adjusted_mark}) trên '{tgt_schema}.{table_name}'."
-                    )
+        init_checkpoint_manager(tgt_engine)
+        if logical_name and not rule.get("resume_in_progress"):
+            reset_table_checkpoint_for_new_batch(
+                tgt_engine,
+                logical_name,
+                table_name,
+                watermark_column,
+                "BATCH_INIT",
+            )
         try:
             for chunk in chunk_stream:
                 batch_idx += 1

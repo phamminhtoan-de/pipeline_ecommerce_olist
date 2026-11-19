@@ -1,13 +1,13 @@
 import json
 import urllib.request
-from src.config.settings import ALERT_WEBHOOK_URL
+from src.config.settings import ALERT_ON_SCRIPT_ERROR, ALERT_WEBHOOK_URL
 from src.core.logger import get_logger
 
 logger = get_logger(__name__)
 
 
 def send_alert_webhook(message):
-    if not ALERT_WEBHOOK_URL:
+    if not ALERT_ON_SCRIPT_ERROR or not ALERT_WEBHOOK_URL:
         return
     try:
         payload = json.dumps({"content": message, "text": message}).encode("utf-8")

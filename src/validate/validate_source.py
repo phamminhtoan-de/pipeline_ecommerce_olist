@@ -11,25 +11,26 @@ from src.schema.contract import resolve_and_validate_columns
 logger = get_logger(__name__)
 
 
-def _parse_sql_statements(sql_text):
+def parse_sql_statements(sql_text):
     lines = [line for line in sql_text.splitlines() if not line.strip().startswith("--")]
     return [s.strip() for s in "\n".join(lines).split(";") if s.strip()]
 
 
-def measure_source_baseline(schema="dbo", engine=None, watermark_states=None, batch_time=None):
+def measure_source_baseline(schema="dbo", engine=None, watermark_states=None, batch_time=None, in_progress_tables=None):
     logger.info("=== [CƠ CHẾ 1 - PRE-EXTRACT] BẮT ĐẦU ĐO ĐẠC THÔNG SỐ CHUẨN TỪ SOURCE ===")
     engine = engine or get_source_engine()
     watermark_states = watermark_states or {}
+    in_progress_set = in_progress_tables or set()
 
     if not VALIDATE_SQL_PATH_SOURCE.exists():
         raise FileNotFoundError(f"Không tìm thấy file SQL chuẩn: {VALIDATE_SQL_PATH_SOURCE}")
 
-    statements = _parse_sql_statements(VALIDATE_SQL_PATH_SOURCE.read_text(encoding="utf-8"))
+    statements = parse_sql_statements(VALIDATE_SQL_PATH_SOURCE.read_text(encoding="utf-8"))
 
     source_baseline = {}
     with engine.connect() as conn:
         try:
-            conn.execute(text("SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;"))
+            conn.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED;"))
         except Exception:
             pass
         row_counts = {}
@@ -68,7 +69,8 @@ def measure_source_baseline(schema="dbo", engine=None, watermark_states=None, ba
         existing_tables = set(inspector.get_table_names(schema=schema))
 
         for logical_name, candidates in OLIST_7_TABLES.items():
-            rule = EXTRACT_PIPELINE_RULES.get(logical_name, {})
+            rule = dict(EXTRACT_PIPELINE_RULES.get(logical_name, {}))
+            rule["resume_in_progress"] = logical_name in in_progress_set
             strategy = str(rule.get("strategy", "full")).lower().strip()
             if strategy == "cancel":
                 logger.warning(f"[BASELINE SKIP] Bảng '{logical_name}' có strategy='cancel' -> Bỏ qua đo baseline.")

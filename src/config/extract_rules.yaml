@@ -42,7 +42,7 @@ customers:
 # BẢNG 2: ORDERS (Đơn hàng)
 # --------------------------------------------------------------------------------------------------
 orders:
-  strategy: full
+  strategy: watermark
   target_table: olist_orders_dataset
   candidates:
     - olist_orders_dataset
@@ -59,7 +59,7 @@ orders:
 # BẢNG 3: ORDER_REVIEWS (Đánh giá đơn hàng)
 # --------------------------------------------------------------------------------------------------
 order_reviews:
-  strategy: full
+  strategy: lookback_window
   target_table: olist_order_reviews_dataset
   candidates:
     - olist_order_reviews_dataset

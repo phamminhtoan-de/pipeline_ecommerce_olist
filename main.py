@@ -51,12 +51,14 @@ def _process_single_table_worker(
     src_engine,
     tgt_engine,
     target_schema,
+    in_progress_tables=None,
 ):
     rule = dict(rule_template)
     actual_name = base_info["actual_table_name"]
     resolved_columns = base_info["expected_columns"]
     rule["resolved_columns"] = resolved_columns
     rule["source_columns"] = base_info.get("source_columns_meta", [])
+    rule["resume_in_progress"] = logical_name in (in_progress_tables or set())
     last_wm = watermark_states.get(logical_name)
 
     query_str = build_dynamic_query(
@@ -131,16 +133,31 @@ def main():
         src_engine = get_source_engine()
 
         init_bronze_schema(tgt_engine, target_schema=target_schema)
+        init_checkpoint_manager(tgt_engine)
+        active_checkpoints = get_active_checkpoints(tgt_engine)
+        in_progress_tables = {
+            name for name, cp in active_checkpoints.items() if cp.get("status") == "IN_PROGRESS"
+        }
+        if in_progress_tables:
+            logger.warning(
+                f"🔄 [CRASH RECOVERY] Phát hiện bảng chưa hoàn tất ở lần chạy trước: {sorted(in_progress_tables)} "
+                f"-> Kích hoạt chế độ resume (>= watermark)..."
+            )
 
         watermark_states = get_watermark_states(tgt_engine, tgt_schema=target_schema)
 
-        source_baseline = measure_source_baseline(watermark_states=watermark_states, batch_time=batch_time)
+        source_baseline = measure_source_baseline(
+            watermark_states=watermark_states,
+            batch_time=batch_time,
+            in_progress_tables=in_progress_tables,
+        )
 
         if sequential_mode:
             for logical_name, actual_name, rule, chunk_stream in extract_from_sqlserver(
                 batch_time=batch_time,
                 watermark_states=watermark_states,
                 source_baseline=source_baseline,
+                in_progress_tables=in_progress_tables,
             ):
                 pipeline_stats[logical_name] = load_single_table(
                     logical_name, actual_name, rule, chunk_stream, tgt_engine, tgt_schema=target_schema
@@ -160,6 +177,7 @@ def main():
                         src_engine,
                         tgt_engine,
                         target_schema,
+                        in_progress_tables,
                     )
                     for logical_name, base_info in source_baseline.items()
                 ]
