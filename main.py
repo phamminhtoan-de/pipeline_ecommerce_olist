@@ -19,7 +19,6 @@ from src.state.state_manager import (
     mark_all_checkpoints_completed,
 )
 from src.state.watermark import get_watermark_states
-from src.transformation.dbt_runner import run_dbt_all
 from src.validate import measure_source_baseline, validate_staging_against_baseline
 
 logger = get_logger(__name__)
@@ -200,9 +199,6 @@ def main():
             f"📊 TỔNG CỘNG BRONZE: {len(pipeline_stats)} bảng | {total_rows:,} dòng | Thời gian nạp: {total_elapsed:.2f}s"
         )
         logger.info("🎉 NẠP TẦNG BRONZE THÀNH CÔNG 100%!")
-
-        if "--transform" in sys.argv or "--all" in sys.argv:
-            run_dbt_all(full_refresh="--full-refresh" in sys.argv)
 
     except SchemaValidationError as sve:
         total_elapsed = time.time() - pipeline_start
