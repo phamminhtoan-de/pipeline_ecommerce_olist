@@ -42,7 +42,7 @@ customers:
 # BẢNG 2: ORDERS (Đơn hàng)
 # --------------------------------------------------------------------------------------------------
 orders:
-  strategy: watermark
+  strategy: lookback_window
   target_table: olist_orders_dataset
   candidates:
     - olist_orders_dataset
@@ -50,6 +50,7 @@ orders:
   primary_keys:
     - order_id
   watermark_column: order_purchase_timestamp
+  lookback_days: 60
   default_start_watermark: "2016-01-01 00:00:00"
   columns:
     mode: all
