@@ -48,6 +48,14 @@ GOLD_DIM_BASE_MODELS = ["dim_date", "dim_location", "dim_product"]
 GOLD_DIM_DEPENDENT_MODELS = ["dim_customer", "dim_seller"]
 GOLD_FACT_MODELS = ["fact_orders", "fact_sales"]
 GOLD_ALL_MODELS = GOLD_DIM_BASE_MODELS + GOLD_DIM_DEPENDENT_MODELS + GOLD_FACT_MODELS
+GOLD_BUSINESS_RULES = [
+    "assert_delivered_orders_have_delivery_date",
+    "assert_fact_orders_match_sales_amount",
+    "assert_fact_orders_match_sales_items_count",
+    "assert_order_dates_chronology",
+    "assert_sales_amounts_positive",
+    "assert_valid_review_score",
+]
 
 
 def on_task_failure_alert(context):
@@ -167,6 +175,13 @@ with DAG(
         retries=0,
     )
 
+    dbt_source_freshness = BashOperator(
+        task_id="dbt_source_freshness",
+        bash_command=f"{DBT_CLI} source freshness --target-path /tmp/dbt_source_freshness",
+        cwd=DBT_PROJECT_DIR,
+        retries=0,
+    )
+
     with TaskGroup(
         group_id="dbt_silver",
         tooltip="Làm sạch, chuẩn hóa & dedup song song 7 model tầng Silver",
@@ -236,17 +251,22 @@ with DAG(
         retries=0,
     )
 
-    dbt_test_business_rules = BashOperator(
-        task_id="dbt_test_business_rules",
-        bash_command=f"{DBT_CLI} test --select test_type:singular --target-path /tmp/dbt_test_business_rules",
-        cwd=DBT_PROJECT_DIR,
-        retries=0,
-    )
+    with TaskGroup(
+        group_id="dbt_test_business_rules",
+        tooltip="Kiểm tra riêng từng quy tắc nghiệp vụ tầng Gold (6 singular tests)",
+    ) as dbt_test_business_rules:
+        for rule_name in GOLD_BUSINESS_RULES:
+            BashOperator(
+                task_id=f"rule_{rule_name}",
+                bash_command=f"{DBT_CLI} test --select {rule_name} --target-path /tmp/dbt_test_{rule_name}",
+                cwd=DBT_PROJECT_DIR,
+                retries=0,
+            )
 
     check_connections >> [init_bronze_schema, dbt_deps]
     init_bronze_schema >> extract_load_bronze
     extract_load_bronze >> validate_bronze
-    [extract_load_bronze, dbt_deps] >> dbt_test_bronze_source
+    [extract_load_bronze, dbt_deps] >> [dbt_test_bronze_source, dbt_source_freshness]
     [validate_bronze, dbt_test_bronze_source] >> dbt_silver
     dbt_silver >> dbt_test_silver >> dbt_snapshot >> dbt_gold
     dbt_gold >> [dbt_test_gold_schema, dbt_test_business_rules]

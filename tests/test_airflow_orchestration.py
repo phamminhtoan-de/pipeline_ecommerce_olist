@@ -25,6 +25,7 @@ class TestAirflowOrchestration(unittest.TestCase):
                     "GOLD_DIM_BASE_MODELS",
                     "GOLD_DIM_DEPENDENT_MODELS",
                     "GOLD_FACT_MODELS",
+                    "GOLD_BUSINESS_RULES",
                 }:
                     constants[name] = ast.literal_eval(node.value)
             elif isinstance(node, ast.Call):
@@ -52,7 +53,10 @@ class TestAirflowOrchestration(unittest.TestCase):
         self.assertEqual(dag_kwargs.get("max_active_runs"), 1)
         self.assertEqual(dag_kwargs.get("max_active_tasks"), 3)
 
-        self.assertEqual(group_ids, ["extract_load_bronze", "dbt_silver", "dbt_gold"])
+        self.assertEqual(
+            group_ids,
+            ["extract_load_bronze", "dbt_silver", "dbt_gold", "dbt_test_business_rules"],
+        )
         self.assertEqual(
             task_ids,
             [
@@ -61,10 +65,10 @@ class TestAirflowOrchestration(unittest.TestCase):
                 "dbt_deps",
                 "validate_bronze",
                 "dbt_test_bronze_source",
+                "dbt_source_freshness",
                 "dbt_test_silver",
                 "dbt_snapshot",
                 "dbt_test_gold_schema",
-                "dbt_test_business_rules",
             ],
         )
         self.assertEqual(
@@ -86,13 +90,14 @@ class TestAirflowOrchestration(unittest.TestCase):
         self.assertEqual(constants.get("GOLD_DIM_BASE_MODELS"), ["dim_date", "dim_location", "dim_product"])
         self.assertEqual(constants.get("GOLD_DIM_DEPENDENT_MODELS"), ["dim_customer", "dim_seller"])
         self.assertEqual(constants.get("GOLD_FACT_MODELS"), ["fact_orders", "fact_sales"])
+        self.assertEqual(len(constants.get("GOLD_BUSINESS_RULES", [])), 6)
 
         compact_source = " ".join(source.split())
         for dep_edge in (
             "check_connections >> [init_bronze_schema, dbt_deps]",
             "init_bronze_schema >> extract_load_bronze",
             "extract_load_bronze >> validate_bronze",
-            "[extract_load_bronze, dbt_deps] >> dbt_test_bronze_source",
+            "[extract_load_bronze, dbt_deps] >> [dbt_test_bronze_source, dbt_source_freshness]",
             "[validate_bronze, dbt_test_bronze_source] >> dbt_silver",
             "dbt_silver >> dbt_test_silver >> dbt_snapshot >> dbt_gold",
             "dbt_gold >> [dbt_test_gold_schema, dbt_test_business_rules]",
@@ -106,9 +111,10 @@ class TestAirflowOrchestration(unittest.TestCase):
             "--validate-only --run-id",
             "--target-path /tmp/dbt_{model_name}",
             "--select source:* --target-path /tmp/dbt_test_bronze_source",
+            "source freshness --target-path /tmp/dbt_source_freshness",
             "--select staging --exclude source:* --target-path /tmp/dbt_test_silver",
             "--select marts,test_type:generic --target-path /tmp/dbt_test_gold_schema",
-            "--select test_type:singular --target-path /tmp/dbt_test_business_rules",
+            "--select {rule_name} --target-path /tmp/dbt_test_{rule_name}",
         ):
             self.assertIn(expected_flag, source)
 
