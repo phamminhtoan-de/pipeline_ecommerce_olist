@@ -125,11 +125,13 @@ jobs:
           cd dbt_transform
           dbt deps
           dbt parse --no-partial-parse
+          dbt test --select source:*
           dbt run --select staging --full-refresh
-          dbt test --select staging source:*
+          dbt test --select staging --exclude source:*
           dbt snapshot
           dbt run --select marts --full-refresh
-          dbt test --exclude staging source:*
+          dbt test --select marts,test_type:generic
+          dbt test --select test_type:singular
 
   docker-build:
     name: Docker Container Image Build
