@@ -120,7 +120,7 @@ etl_ecommerce_data/
 │   └── pipeline.log                  # File log duy nhất của pipeline (ghi giờ chuẩn UTC, xoay vòng 10MB)
 │
 ├── Docker/
-│   └── docker-compose.yml            # Điều phối toàn cụm (SQL Server, PostgreSQL DWH & Apache Airflow 3.0)
+│   └── docker-compose.yml            # Điều phối cụm Apache Airflow 3.1 (kết nối DB nguồn/đích qua host.docker.internal)
 │
 ├── docs/
 │   ├── README.md                     # Tài liệu kỹ thuật chi tiết của dự án
@@ -265,7 +265,7 @@ etl_ecommerce_data/
 
 #### Lựa chọn 1: Triển khai & Điều phối tự động bằng Apache Airflow + Docker Compose (Khuyên dùng)
 
-Khởi chạy trọn bộ cụm **SQL Server 2022 + PostgreSQL 16 + Apache Airflow 3.0** bằng một lệnh duy nhất (cần cấp Docker Desktop tối thiểu ~6 GB RAM):
+Khởi chạy cụm **Apache Airflow 3.1** (tự động kết nối tới SQL Server và PostgreSQL DWH đang chạy trên máy host qua `host.docker.internal`, cần cấp Docker Desktop tối thiểu ~4 GB RAM):
 ```powershell
 docker compose --env-file .env -f Docker/docker-compose.yml up -d --build
 ```

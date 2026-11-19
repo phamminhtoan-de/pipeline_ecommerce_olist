@@ -25,13 +25,13 @@ x-airflow-common: &airflow-common
     # Tắt alert ở script Python khi chạy dưới Airflow để tránh gửi trùng khi retry (chỉ giữ callback cấp DAG)
     ALERT_ON_SCRIPT_ERROR: "false"
     SRC_DB_TIMEZONE: ${SRC_DB_TIMEZONE:-UTC}
-    # Ghi đè host/driver để các task ETL kết nối thẳng tới container trên elt_network
+    # Ghi đè host/driver để các task ETL trong container kết nối tới SQL Server & PostgreSQL trên máy host
     SRC_DB_DRIVER: ODBC Driver 18 for SQL Server
-    SRC_DB_SERVER: sqlserver_oltp
-    SRC_DB_PORT: 1433
+    SRC_DB_SERVER: ${DOCKER_SRC_DB_SERVER:-host.docker.internal}
+    SRC_DB_PORT: ${SRC_DB_PORT:-1433}
     SRC_DB_TRUSTED_CONNECTION: "no"
-    TGT_DB_HOST: postgres_dwh
-    TGT_DB_PORT: 5432
+    TGT_DB_HOST: ${DOCKER_TGT_DB_HOST:-host.docker.internal}
+    TGT_DB_PORT: ${TGT_DB_PORT:-5432}
     ETL_PROJECT_DIR: /opt/project
     ETL_PYTHON_BIN: /opt/etl_venv/bin/python
   volumes:
@@ -45,47 +45,6 @@ x-airflow-common: &airflow-common
     - elt_network
 
 services:
-  sqlserver_oltp:
-    image: mcr.microsoft.com/mssql/server:2022-latest
-    container_name: olist_sqlserver
-    restart: unless-stopped
-    environment:
-      ACCEPT_EULA: "Y"
-      MSSQL_SA_PASSWORD: "${SRC_DB_PASSWORD:-YourStrongPassword123!}"
-      MSSQL_PID: "Express"
-    ports:
-      - "${SRC_DB_PORT:-1433}:1433"
-    volumes:
-      - sqlserver_data:/var/opt/mssql/data
-    healthcheck:
-      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$${MSSQL_SA_PASSWORD}\" -C -Q 'SELECT 1' || /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P \"$${MSSQL_SA_PASSWORD}\" -Q 'SELECT 1'"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 15s
-    networks:
-      - elt_network
-
-  postgres_dwh:
-    image: postgres:16
-    container_name: olist_dwh
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: ${TGT_DB_NAME:-olist_dwh}
-      POSTGRES_USER: ${TGT_DB_USER:-postgres}
-      POSTGRES_PASSWORD: "${TGT_DB_PASSWORD:?Thieu TGT_DB_PASSWORD trong file .env}"
-    ports:
-      - "${TGT_DB_PORT:-5432}:5432"
-    volumes:
-      - postgres_dwh_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-    networks:
-      - elt_network
-
   airflow_metadb:
     image: postgres:16
     container_name: olist_airflow_metadb
@@ -179,8 +138,6 @@ services:
         condition: service_completed_successfully
 
 volumes:
-  postgres_dwh_data:
-  sqlserver_data:
   airflow_metadb_data:
 
 networks:
