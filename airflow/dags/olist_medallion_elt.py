@@ -20,7 +20,7 @@ except ImportError:
 PROJECT_DIR = os.getenv("ETL_PROJECT_DIR", "/opt/project")
 ETL_PYTHON = os.getenv("ETL_PYTHON_BIN", "/opt/etl_venv/bin/python")
 DBT_PROJECT_DIR = f"{PROJECT_DIR}/dbt_transform"
-DBT_CLI = f"{ETL_PYTHON} -m dbt.cli.main --no-use-colors"
+DBT_CLI = f"{ETL_PYTHON} -m dbt.cli.main --no-use-colors --log-path ../logs"
 DBT_ENSURE_DEPS = f'if [ ! -d "{DBT_PROJECT_DIR}/dbt_packages/dbt_utils" ]; then {DBT_CLI} deps; fi'
 
 
