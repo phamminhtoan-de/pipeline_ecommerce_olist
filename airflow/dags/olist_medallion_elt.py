@@ -6,10 +6,11 @@ import urllib.request
 import pendulum
 
 try:
-    from airflow.sdk import DAG, Param
+    from airflow.sdk import DAG, Param, TaskGroup
 except ImportError:
     from airflow.models.dag import DAG
     from airflow.models.param import Param
+    from airflow.utils.task_group import TaskGroup
 
 try:
     from airflow.providers.standard.operators.bash import BashOperator
@@ -22,6 +23,31 @@ ETL_PYTHON = os.getenv("ETL_PYTHON_BIN", "/opt/etl_venv/bin/python")
 DBT_PROJECT_DIR = f"{PROJECT_DIR}/dbt_transform"
 DBT_CLI = f"{ETL_PYTHON} -m dbt.cli.main --no-use-colors --log-path ../logs"
 DBT_ENSURE_DEPS = f'if [ ! -d "{DBT_PROJECT_DIR}/dbt_packages/dbt_utils" ]; then {DBT_CLI} deps; fi'
+
+BRONZE_TABLES = [
+    "customers",
+    "orders",
+    "order_items",
+    "order_payments",
+    "order_reviews",
+    "products",
+    "sellers",
+]
+
+SILVER_MODELS = [
+    "stg_customers",
+    "stg_orders",
+    "stg_order_items",
+    "stg_order_payments",
+    "stg_order_reviews",
+    "stg_products",
+    "stg_sellers",
+]
+
+GOLD_DIM_BASE_MODELS = ["dim_date", "dim_location", "dim_product"]
+GOLD_DIM_DEPENDENT_MODELS = ["dim_customer", "dim_seller"]
+GOLD_FACT_MODELS = ["fact_orders", "fact_sales"]
+GOLD_ALL_MODELS = GOLD_DIM_BASE_MODELS + GOLD_DIM_DEPENDENT_MODELS + GOLD_FACT_MODELS
 
 
 def on_task_failure_alert(context):
@@ -84,7 +110,7 @@ with DAG(
 ) as dag:
     preflight_check = BashOperator(
         task_id="preflight_check",
-        bash_command=f"{ETL_PYTHON} main.py --preflight",
+        bash_command=f"{ETL_PYTHON} main.py --preflight --init-schema",
         cwd=PROJECT_DIR,
         retries=3,
         retry_delay=timedelta(seconds=15),
@@ -92,26 +118,44 @@ with DAG(
         max_retry_delay=timedelta(minutes=2),
     )
 
-    extract_load_bronze = BashOperator(
-        task_id="extract_load_bronze",
-        bash_command=f"{ETL_PYTHON} main.py",
-        cwd=PROJECT_DIR,
-        retries=2,
-        retry_delay=timedelta(minutes=1),
-        retry_exponential_backoff=True,
-        max_retry_delay=timedelta(minutes=5),
-    )
+    with TaskGroup(
+        group_id="extract_load_bronze",
+        tooltip="Trích xuất và nạp song song 7 bảng từ SQL Server vào PostgreSQL Bronze",
+    ) as extract_load_bronze:
+        for table_name in BRONZE_TABLES:
+            BashOperator(
+                task_id=f"bronze_{table_name}",
+                bash_command=f"{ETL_PYTHON} main.py --table {table_name}",
+                cwd=PROJECT_DIR,
+                retries=2,
+                retry_delay=timedelta(minutes=1),
+                retry_exponential_backoff=True,
+                max_retry_delay=timedelta(minutes=5),
+            )
 
-    dbt_silver = BashOperator(
-        task_id="dbt_silver",
-        bash_command=(
-            f"{DBT_ENSURE_DEPS} && {DBT_CLI} run --select staging "
-            "{{ '--full-refresh' if params.full_refresh else '' }}"
-        ),
+    dbt_deps = BashOperator(
+        task_id="dbt_deps",
+        bash_command=DBT_ENSURE_DEPS,
         cwd=DBT_PROJECT_DIR,
         retries=1,
-        retry_delay=timedelta(minutes=1),
+        retry_delay=timedelta(seconds=30),
     )
+
+    with TaskGroup(
+        group_id="dbt_silver",
+        tooltip="Làm sạch, chuẩn hóa & dedup song song 7 model tầng Silver",
+    ) as dbt_silver:
+        for model_name in SILVER_MODELS:
+            BashOperator(
+                task_id=f"silver_{model_name}",
+                bash_command=(
+                    f"{DBT_CLI} run --select {model_name} --target-path /tmp/dbt_{model_name} "
+                    "{{ '--full-refresh' if params.full_refresh else '' }}"
+                ),
+                cwd=DBT_PROJECT_DIR,
+                retries=1,
+                retry_delay=timedelta(minutes=1),
+            )
 
     dbt_test_silver = BashOperator(
         task_id="dbt_test_silver",
@@ -128,16 +172,36 @@ with DAG(
         retry_delay=timedelta(minutes=1),
     )
 
-    dbt_gold = BashOperator(
-        task_id="dbt_gold",
-        bash_command=(
-            f"{DBT_CLI} run --select marts "
-            "{{ '--full-refresh' if params.full_refresh else '' }}"
-        ),
-        cwd=DBT_PROJECT_DIR,
-        retries=1,
-        retry_delay=timedelta(minutes=1),
-    )
+    with TaskGroup(
+        group_id="dbt_gold",
+        tooltip="Xây dựng Star Schema tầng Gold theo thứ tự phụ thuộc Dimension -> Fact",
+    ) as dbt_gold:
+        gold_tasks = {}
+        for model_name in GOLD_ALL_MODELS:
+            gold_tasks[model_name] = BashOperator(
+                task_id=f"gold_{model_name}",
+                bash_command=(
+                    f"{DBT_CLI} run --select {model_name} --target-path /tmp/dbt_{model_name} "
+                    "{{ '--full-refresh' if params.full_refresh else '' }}"
+                ),
+                cwd=DBT_PROJECT_DIR,
+                retries=1,
+                retry_delay=timedelta(minutes=1),
+            )
+
+        gold_tasks["dim_location"] >> [gold_tasks["dim_customer"], gold_tasks["dim_seller"]]
+        [
+            gold_tasks["dim_date"],
+            gold_tasks["dim_location"],
+            gold_tasks["dim_customer"],
+        ] >> gold_tasks["fact_orders"]
+        [
+            gold_tasks["dim_date"],
+            gold_tasks["dim_location"],
+            gold_tasks["dim_customer"],
+            gold_tasks["dim_product"],
+            gold_tasks["dim_seller"],
+        ] >> gold_tasks["fact_sales"]
 
     dbt_test_gold = BashOperator(
         task_id="dbt_test_gold",
@@ -149,6 +213,7 @@ with DAG(
     (
         preflight_check
         >> extract_load_bronze
+        >> dbt_deps
         >> dbt_silver
         >> dbt_test_silver
         >> dbt_snapshot

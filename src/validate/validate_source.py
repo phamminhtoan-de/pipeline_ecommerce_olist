@@ -16,7 +16,14 @@ def parse_sql_statements(sql_text):
     return [s.strip() for s in "\n".join(lines).split(";") if s.strip()]
 
 
-def measure_source_baseline(schema="dbo", engine=None, watermark_states=None, batch_time=None, in_progress_tables=None):
+def measure_source_baseline(
+    schema="dbo",
+    engine=None,
+    watermark_states=None,
+    batch_time=None,
+    in_progress_tables=None,
+    target_tables=None,
+):
     logger.info("=== BẮT ĐẦU ĐO ĐẠC THÔNG SỐ BASELINE TỪ SOURCE ===")
     engine = engine or get_source_engine()
     watermark_states = watermark_states or {}
@@ -68,7 +75,10 @@ def measure_source_baseline(schema="dbo", engine=None, watermark_states=None, ba
         inspector = inspect(engine)
         existing_tables = set(inspector.get_table_names(schema=schema))
 
+        target_set = set(target_tables) if target_tables is not None else None
         for logical_name, candidates in OLIST_7_TABLES.items():
+            if target_set is not None and logical_name not in target_set:
+                continue
             rule = dict(EXTRACT_PIPELINE_RULES.get(logical_name, {}))
             rule["resume_in_progress"] = logical_name in in_progress_set
             strategy = str(rule.get("strategy", "full")).lower().strip()

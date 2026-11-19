@@ -1,3 +1,4 @@
+import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import sys
 import time
@@ -29,9 +30,10 @@ REQUIRED_TABLES = [
 ]
 
 
-def ensure_all_tables_loaded(pipeline_stats):
+def ensure_all_tables_loaded(pipeline_stats, required_tables=None):
+    expected_tables = REQUIRED_TABLES if required_tables is None else required_tables
     failed = {n: s["status"] for n, s in pipeline_stats.items() if s["status"] != "SUCCESS"}
-    skipped = [n for n in REQUIRED_TABLES if n not in pipeline_stats]
+    skipped = [n for n in expected_tables if n not in pipeline_stats]
 
     if failed or skipped:
         details = [f"  - {n}: {status}" for n, status in failed.items()]
@@ -39,6 +41,42 @@ def ensure_all_tables_loaded(pipeline_stats):
         raise RuntimeError(
             f"Có {len(failed) + len(skipped)} bảng không nạp thành công -> DỪNG PIPELINE:\n" + "\n".join(details)
         )
+
+
+def _parse_cli_args(argv=None):
+    parser = argparse.ArgumentParser(description="Olist E-Commerce Medallion Bronze Pipeline")
+    parser.add_argument("--preflight", action="store_true", help="Kiểm tra kết nối Source và Target DB rồi thoát")
+    parser.add_argument(
+        "--init-schema",
+        action="store_true",
+        help="Khởi tạo trước schema Bronze và bảng metadata (dùng cùng --preflight)",
+    )
+    parser.add_argument("--sequential", action="store_true", help="Chạy tuần tự thay vì ThreadPoolExecutor")
+    parser.add_argument(
+        "--table",
+        action="append",
+        dest="tables",
+        default=None,
+        help="Tên logical bảng cần nạp (lặp lại hoặc phân tách dấu phẩy, vd: --table orders)",
+    )
+    args = parser.parse_args(argv)
+
+    target_tables = None
+    if args.tables:
+        parsed_tables = []
+        for raw in args.tables:
+            for item in raw.split(","):
+                cleaned = item.strip()
+                if cleaned and cleaned not in parsed_tables:
+                    parsed_tables.append(cleaned)
+        invalid = [t for t in parsed_tables if t not in EXTRACT_PIPELINE_RULES]
+        if invalid:
+            parser.error(
+                f"Bảng không hợp lệ: {invalid}. Giá trị hợp lệ: {sorted(EXTRACT_PIPELINE_RULES.keys())}"
+            )
+        target_tables = parsed_tables
+
+    return args, target_tables
 
 
 def _process_single_table_worker(
@@ -95,10 +133,18 @@ def _process_single_table_worker(
 
 
 def main():
-    if "--preflight" in sys.argv:
+    args, target_tables = _parse_cli_args(sys.argv[1:])
+
+    if args.preflight:
         logger.info("🔍 Đang kiểm tra kết nối Source (SQL Server) và Target (PostgreSQL)...")
         try:
             test_connections()
+            if args.init_schema:
+                logger.info("🛠️ Đang khởi tạo trước schema Bronze và metadata (--init-schema)...")
+                tgt_engine = get_target_engine()
+                init_bronze_schema(tgt_engine, target_schema=TGT_DB_SCHEMA)
+                init_checkpoint_manager(tgt_engine)
+                get_watermark_states(tgt_engine, tgt_schema=TGT_DB_SCHEMA)
             logger.info("✅ Kết nối Source và Target Database đều sẵn sàng!")
             return
         except Exception as exc:
@@ -123,9 +169,13 @@ def main():
 
     target_schema = TGT_DB_SCHEMA
     tgt_engine = None
-    sequential_mode = "--sequential" in sys.argv or ETL_MAX_WORKERS <= 1
+    sequential_mode = args.sequential or ETL_MAX_WORKERS <= 1
+    expected_tables = (
+        [t for t in target_tables if t in REQUIRED_TABLES] if target_tables is not None else REQUIRED_TABLES
+    )
+    scope_desc = f"bảng {target_tables}" if target_tables is not None else "toàn bộ 7 bảng"
 
-    logger.info(f"🚀 BẮT ĐẦU CHẠY PIPELINE (BATCH ID: {batch_id})")
+    logger.info(f"🚀 BẮT ĐẦU CHẠY PIPELINE ({scope_desc} | BATCH ID: {batch_id})")
 
     try:
         test_connections()
@@ -150,6 +200,7 @@ def main():
             watermark_states=watermark_states,
             batch_time=batch_time,
             in_progress_tables=in_progress_tables,
+            target_tables=target_tables,
         )
 
         if sequential_mode:
@@ -158,13 +209,30 @@ def main():
                 watermark_states=watermark_states,
                 source_baseline=source_baseline,
                 in_progress_tables=in_progress_tables,
+                target_tables=target_tables,
             ):
                 pipeline_stats[logical_name] = load_single_table(
                     logical_name, actual_name, rule, chunk_stream, tgt_engine, tgt_schema=target_schema
                 )
+        elif len(source_baseline) <= 1:
+            for logical_name, base_info in source_baseline.items():
+                _, stat = _process_single_table_worker(
+                    logical_name,
+                    base_info,
+                    EXTRACT_PIPELINE_RULES.get(logical_name, {}),
+                    watermark_states,
+                    batch_time,
+                    batch_id,
+                    src_engine,
+                    tgt_engine,
+                    target_schema,
+                    in_progress_tables,
+                )
+                if stat is not None:
+                    pipeline_stats[logical_name] = stat
         else:
             logger.info(f"⚡ Kích hoạt trích xuất & nạp song song ({ETL_MAX_WORKERS} workers)...")
-            with ThreadPoolExecutor(max_workers=ETL_MAX_WORKERS) as executor:
+            with ThreadPoolExecutor(max_workers=min(ETL_MAX_WORKERS, len(source_baseline))) as executor:
                 futures = [
                     executor.submit(
                         _process_single_table_worker,
@@ -186,7 +254,7 @@ def main():
                     if stat is not None:
                         pipeline_stats[logical_name] = stat
 
-        ensure_all_tables_loaded(pipeline_stats)
+        ensure_all_tables_loaded(pipeline_stats, required_tables=expected_tables)
 
         validate_staging_against_baseline(
             source_baseline=source_baseline,

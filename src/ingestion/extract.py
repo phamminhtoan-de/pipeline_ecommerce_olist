@@ -237,6 +237,7 @@ def extract_from_sqlserver(
     watermark_states=None,
     source_baseline=None,
     in_progress_tables=None,
+    target_tables=None,
 ):
     total_start = time.time()
     if batch_time is None:
@@ -252,7 +253,11 @@ def extract_from_sqlserver(
     inspector = None
     existing_tables = None
 
+    target_set = set(target_tables) if target_tables is not None else None
+
     for logical_name, rule_template in EXTRACT_PIPELINE_RULES.items():
+        if target_set is not None and logical_name not in target_set:
+            continue
         rule = dict(rule_template)
         rule["resume_in_progress"] = logical_name in in_progress_set
         if logical_name in source_baseline:
