@@ -1,5 +1,4 @@
 from sqlalchemy import inspect, text
-from src.config.settings import EXTRACT_PIPELINE_RULES, TGT_DB_SCHEMA
 from src.core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -52,7 +51,7 @@ def sync_target_schema_evolution(tgt_engine, tgt_schema, target_table, chunk_col
     for col in chunk_columns:
         if col.lower() not in existing_tgt_cols:
             if col in ("_extracted_at", "_batch_id"):
-                pg_type = "TIMESTAMP" if col == "_extracted_at" else "VARCHAR(30)"
+                pg_type = "TIMESTAMP" if col == "_extracted_at" else "VARCHAR(64)"
             else:
                 col_meta = source_meta_lookup.get(col.lower(), {})
                 pg_type = map_source_type_to_postgres(col, col_meta)
@@ -72,66 +71,4 @@ def sync_target_schema_evolution(tgt_engine, tgt_schema, target_table, chunk_col
             existing_tgt_cols.add(col.lower())
 
     return added_columns
-
-
-def ensure_staging_primary_keys(tgt_engine, tgt_schema=TGT_DB_SCHEMA):
-    try:
-        inspector = inspect(tgt_engine)
-        existing_tables = set(inspector.get_table_names(schema=tgt_schema))
-
-        for logical_name, rule in EXTRACT_PIPELINE_RULES.items():
-            tbl = rule.get("target_table")
-            primary_keys = rule.get("primary_keys") or []
-            if not tbl or not primary_keys or tbl not in existing_tables:
-                continue
-
-            pk_constraint = inspector.get_pk_constraint(tbl, schema=tgt_schema)
-            existing_pk_cols = pk_constraint.get("constrained_columns") or []
-            if set(existing_pk_cols) == set(primary_keys):
-                continue
-
-            null_conditions = " OR ".join(f'"{col}" IS NULL' for col in primary_keys)
-            with tgt_engine.connect() as conn:
-                null_count = conn.execute(
-                    text(f'SELECT COUNT(*) FROM "{tgt_schema}"."{tbl}" WHERE {null_conditions};')
-                ).scalar()
-
-            if null_count > 0:
-                logger.warning(
-                    f"[STAGING PK CHECK] Bảng '{tgt_schema}.{tbl}' có {null_count:,} dòng mang PK NULL! "
-                    f"Tạm thời bỏ qua việc gắn PRIMARY KEY để tránh lỗi."
-                )
-                continue
-
-            cols_str = ", ".join(f'"{col}"' for col in primary_keys)
-            with tgt_engine.connect() as conn:
-                dup_count = conn.execute(
-                    text(
-                        f'SELECT COUNT(*) FROM ('
-                        f'SELECT {cols_str} FROM "{tgt_schema}"."{tbl}" '
-                        f'GROUP BY {cols_str} HAVING COUNT(*) > 1'
-                        f') AS _dup;'
-                    )
-                ).scalar()
-
-            if dup_count > 0:
-                logger.warning(
-                    f"[STAGING PK CHECK] Bảng '{tgt_schema}.{tbl}' có {dup_count:,} nhóm khóa chính bị trùng lặp! "
-                    f"Tạm thời bỏ qua việc gắn PRIMARY KEY để tránh lỗi."
-                )
-                continue
-
-            try:
-                with tgt_engine.begin() as conn:
-                    for col in primary_keys:
-                        conn.execute(text(f'ALTER TABLE "{tgt_schema}"."{tbl}" ALTER COLUMN "{col}" SET NOT NULL;'))
-                    pk_name = f"pk_{tbl}"
-                    conn.execute(
-                        text(f'ALTER TABLE "{tgt_schema}"."{tbl}" ADD CONSTRAINT "{pk_name}" PRIMARY KEY ({cols_str});')
-                    )
-                logger.info(f"🔑 [STAGING PK] Đã tạo thành công Khóa chính & Index cho '{tgt_schema}.{tbl}' ({cols_str}).")
-            except Exception as e:
-                logger.warning(f"[STAGING PK ERROR] Chưa thể tạo PK cho '{tgt_schema}.{tbl}': {e}")
-    except Exception as e:
-        logger.debug(f"[STAGING PK] Lỗi khi kiểm tra PK trong schema '{tgt_schema}': {e}")
 

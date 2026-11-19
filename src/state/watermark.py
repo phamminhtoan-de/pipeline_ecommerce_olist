@@ -29,7 +29,7 @@ def get_watermark_states(tgt_engine, tgt_schema=TGT_DB_SCHEMA):
                 if max_val is not None:
                     watermark_states[logical_name] = str(max_val)[:19]
     except Exception as e:
-        logger.debug(f"[WATERMARK STATE] Chưa thể đọc mốc watermark từ '{tgt_schema}' ({e}) -> Sẽ dùng mốc mặc định.")
+        logger.warning(f"[WATERMARK STATE] Chưa thể đọc mốc watermark từ '{tgt_schema}' ({e}) -> Sẽ dùng mốc mặc định.")
 
     if watermark_states:
         logger.info(f"[WATERMARK STATE] Đã đọc mốc watermark từ Target DB: {watermark_states}")
@@ -75,7 +75,6 @@ def upsert_watermark_state(
             "logical_name": logical_name,
             "target_table": target_table,
             "watermark_column": watermark_column,
-            "last_checkpoint": str(max_watermark)[:19] if "last_checkpoint" in str(upsert_sql) else None,
             "last_watermark": str(max_watermark)[:19],
             "last_batch_id": batch_id,
         },

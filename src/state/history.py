@@ -41,5 +41,5 @@ def save_pipeline_run_history(tgt_engine, tgt_schema, batch_id, pipeline_stats):
                 )
         logger.info(f"[RUN HISTORY] Đã lưu thống kê vận hành batch '{batch_id}' vào '{tgt_schema}._etl_run_history'.")
     except Exception as e:
-        logger.debug(f"[RUN HISTORY] Chưa thể lưu lịch sử chạy vào '{tgt_schema}._etl_run_history': {e}")
+        logger.warning(f"[RUN HISTORY] Chưa thể lưu lịch sử chạy vào '{tgt_schema}._etl_run_history': {e}")
 

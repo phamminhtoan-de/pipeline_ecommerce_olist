@@ -182,15 +182,3 @@ def mark_all_checkpoints_completed(tgt_engine, pipeline_stats, batch_id):
                     {"batch_id": batch_id, "logical_name": logical_name},
                 )
     logger.info(f"✅ [CHECKPOINT MANAGER] Đã đánh dấu COMPLETED thành công cho batch '{batch_id}'.")
-
-
-def has_in_progress_checkpoints(tgt_engine):
-    init_checkpoint_manager(tgt_engine)
-    try:
-        with tgt_engine.connect() as conn:
-            cnt = conn.execute(
-                text(f"SELECT COUNT(*) FROM \"{CHECKPOINT_SCHEMA}\".\"{CHECKPOINT_TABLE}\" WHERE status = 'IN_PROGRESS';")
-            ).scalar()
-            return (cnt or 0) > 0
-    except Exception:
-        return False
