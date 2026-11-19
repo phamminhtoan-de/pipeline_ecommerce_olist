@@ -50,6 +50,13 @@ class TestAirflowOrchestration(unittest.TestCase):
         self.assertIn(expected_chain, compact_source)
         self.assertIn("dbt.cli.main", source)
         self.assertNotIn("src.transformation.dbt_runner", source)
+        self.assertIn("retry_exponential_backoff=True", source)
+
+    def test_connection_delegates_retry_to_airflow(self):
+        import src.core.connection as conn_mod
+
+        self.assertFalse(hasattr(conn_mod, "retry_on_db_error"))
+        self.assertTrue(callable(conn_mod.test_connections))
 
     def test_main_preflight_checks_connections_and_exits_early(self):
         import main

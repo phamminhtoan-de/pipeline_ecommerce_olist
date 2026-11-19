@@ -22,7 +22,7 @@ Dự án áp dụng kiến trúc **Medallion (Lakehouse-style)** nhằm giải q
 * **Data Versioning & Audit Trail**: Lưu trữ toàn bộ lịch sử biến động trạng thái đơn hàng (ví dụ: `created` -> `shipped` -> `delivered`) với siêu dữ liệu `_batch_id` và `_extracted_at`, phục vụ truy vết kiểm toán và phân tích chuỗi sự kiện.
 * **Khử trùng lặp tại tầng Silver dbt (SQL-based Deduplication)**: Chuyển toàn bộ tải tính toán làm sạch, ép kiểu và khử trùng lặp về tầng Silver qua `ROW_NUMBER() OVER (PARTITION BY pk ORDER BY _extracted_at DESC)`. Đảm bảo tính **Idempotency tuyệt đối**.
 * **Unified Gold Star Schema (Kimball)**: Hợp nhất toàn bộ 5 bảng Dimension (bao gồm SCD Type 2 theo dõi khách hàng chuyển địa điểm) và 2 bảng Fact vào một schema duy nhất (`gold`).
-* **Trích xuất đồng thời (Concurrent Extraction)**: Hỗ trợ `ThreadPoolExecutor` nạp song song nhiều bảng, kết hợp cơ chế thử lại (exponential backoff retry) khi kết nối mạng chập chờn.
+* **Trích xuất đồng thời (Concurrent Extraction)**: Hỗ trợ `ThreadPoolExecutor` nạp song song nhiều bảng, kết hợp cơ chế thử lại có giãn cách tăng dần (exponential backoff retry) do Apache Airflow điều phối.
 * **Unified Logging UTC**: Đồng bộ hóa toàn bộ luồng log giữa Python EL và dbt CLI theo chuẩn giờ UTC (`%Y-%m-%d %H:%M:%S UTC`) được lưu trữ tại `logs/pipeline.log`.
 * **Khung kiểm thử chất lượng 4 tầng (4-Tier Quality Framework)**: Phủ kín từ kiểm tra độ tươi mới (freshness) tầng nguồn, hợp lệ tầng Silver, toàn vẹn khóa tầng Marts đến đối chiếu doanh thu, số lượng đơn hàng tầng Gold.
 
@@ -138,7 +138,7 @@ etl_ecommerce_data/
 │   │   ├── settings.py               # Nạp biến môi trường, cấu hình engine SQLAlchemy
 │   │   └── extract_rules.yaml        # Quy tắc trích xuất từng bảng (watermark, full, chunk_size)
 │   ├── core/                         # Tiện ích nền tảng dùng chung (Single Responsibility)
-│   │   ├── connection.py             # Quản trị kết nối DB và hàm retry có exponential backoff
+│   │   ├── connection.py             # Quản trị connection pool SQLAlchemy & kiểm tra kết nối DB
 │   │   ├── logger.py                 # Cấu hình log chuẩn UTC (Console & Rotating File Handler)
 │   │   └── alert.py                  # Dịch vụ thông báo cảnh báo qua Webhook (Discord / Slack)
 │   ├── ingestion/                    # Bộ máy hút & nạp dữ liệu thô (E & L)

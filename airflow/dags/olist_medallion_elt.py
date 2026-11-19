@@ -86,8 +86,10 @@ with DAG(
         task_id="preflight_check",
         bash_command=f"{ETL_PYTHON} main.py --preflight",
         cwd=PROJECT_DIR,
-        retries=2,
-        retry_delay=timedelta(seconds=30),
+        retries=3,
+        retry_delay=timedelta(seconds=15),
+        retry_exponential_backoff=True,
+        max_retry_delay=timedelta(minutes=2),
     )
 
     extract_load_bronze = BashOperator(
@@ -95,7 +97,9 @@ with DAG(
         bash_command=f"{ETL_PYTHON} main.py",
         cwd=PROJECT_DIR,
         retries=2,
-        retry_delay=timedelta(minutes=2),
+        retry_delay=timedelta(minutes=1),
+        retry_exponential_backoff=True,
+        max_retry_delay=timedelta(minutes=5),
     )
 
     dbt_silver = BashOperator(
