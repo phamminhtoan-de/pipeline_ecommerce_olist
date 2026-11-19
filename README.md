@@ -1,6 +1,7 @@
 # Olist E-Commerce Enterprise Medallion Data Pipeline
 
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB.svg?style=flat&logo=python&logoColor=white)](https://www.python.org/)
+[![Airflow](https://img.shields.io/badge/Apache_Airflow-3.1-017CEE.svg?style=flat&logo=apacheairflow&logoColor=white)](https://airflow.apache.org/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1.svg?style=flat&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![dbt](https://img.shields.io/badge/dbt-1.12-FF694B.svg?style=flat&logo=dbt&logoColor=white)](https://www.getdbt.com/)
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496ED.svg?style=flat&logo=docker&logoColor=white)](https://www.docker.com/)
@@ -16,7 +17,7 @@ Hệ thống Data Engineering chuẩn doanh nghiệp theo mô hình **Medallion 
 Dự án áp dụng kiến trúc **Medallion (Lakehouse-style)** nhằm giải quyết dứt điểm các hạn chế của quy trình ETL truyền thống:
 
 ### Các tính năng cốt lõi (Key Features):
-* **Bronze Append-Only Ingestion**: Nạp dữ liệu thô nguyên bản $100\%$ từ SQL Server vào PostgreSQL `bronze` mà không lọc bỏ dòng hay đè dữ liệu. Không mắc "Nghịch lý Incremental" (loại bỏ hoàn toàn việc copy 1 triệu dòng cũ sang staging), chỉ nạp đúng phần delta phát sinh ($O(\Delta N)$).
+* **Bronze Append-Only Incremental & Snapshot Ingestion**: Các bảng sự kiện có mốc thời gian (`orders`, `order_reviews`) được nạp tăng tiến **Append-Only** vào PostgreSQL `bronze` theo chiến lược `watermark` và `lookback_window` (kèm cơ chế checkpoint theo chunk) mà không lọc bỏ hay ghi đè lịch sử; các bảng danh mục/chi tiết không có mốc thời gian nguồn (`customers`, `products`, `sellers`, `order_items`, `order_payments`) sử dụng cơ chế nạp lại toàn phần (**full snapshot reload**). Không mắc "Nghịch lý Incremental", chỉ nạp đúng phần delta phát sinh ($O(\Delta N)$) cho các bảng giao dịch.
 * **In-Transaction Atomic Checkpoint & Watermark**: Mỗi chunk nạp vào và mốc checkpoint trong `etl_metadata._pipeline_checkpoints` được thực thi trong **cùng 1 Transaction ACID**. Khi có sự cố, chunk lỗi tự động rollback, các chunk đã commit trước đó được bảo toàn, cho phép resume chính xác ở lần chạy sau.
 * **Data Versioning & Audit Trail**: Lưu trữ toàn bộ lịch sử biến động trạng thái đơn hàng (ví dụ: `created` -> `shipped` -> `delivered`) với siêu dữ liệu `_batch_id` và `_extracted_at`, phục vụ truy vết kiểm toán và phân tích chuỗi sự kiện.
 * **Khử trùng lặp tại tầng Silver dbt (SQL-based Deduplication)**: Chuyển toàn bộ tải tính toán làm sạch, ép kiểu và khử trùng lặp về tầng Silver qua `ROW_NUMBER() OVER (PARTITION BY pk ORDER BY _extracted_at DESC)`. Đảm bảo tính **Idempotency tuyệt đối**.
@@ -108,15 +109,18 @@ etl_ecommerce_data/
 ├── .gitattributes                    # Chuẩn hóa ký tự xuống dòng LF
 ├── .gitignore                        # Danh sách loại trừ khỏi git (venv, logs, credentials)
 ├── requirements.txt                  # Danh mục thư viện Python
-├── run.sh                            # Script CLI điều phối pipeline tổng hợp (Linux/macOS/Git Bash)
-├── main.py                           # File thực thi điều phối trung tâm (Bronze EL + dbt)
+├── main.py                           # Entrypoint kiểm tra kết nối (--preflight) & nạp tầng Bronze (EL)
+│
+├── airflow/                          # Bộ điều phối Apache Airflow 3.0 (LocalExecutor)
+│   ├── Dockerfile                    # Image Airflow 3.0 + ODBC Driver 18 + /opt/etl_venv độc lập
+│   └── dags/
+│       └── olist_medallion_elt.py    # DAG điều phối 7 bước: Preflight -> Bronze -> Silver -> Snapshot -> Gold
 │
 ├── logs/
 │   └── pipeline.log                  # File log duy nhất của pipeline (ghi giờ chuẩn UTC, xoay vòng 10MB)
 │
 ├── Docker/
-│   ├── Dockerfile                    # Container Debian 12 + Python 3.11 + Microsoft ODBC Driver 18
-│   └── docker-compose.yml            # Điều phối multi-container (DWH PostgreSQL + ETL App)
+│   └── docker-compose.yml            # Điều phối toàn cụm (SQL Server, PostgreSQL DWH & Apache Airflow 3.0)
 │
 ├── docs/
 │   ├── README.md                     # Tài liệu kỹ thuật chi tiết của dự án
@@ -149,11 +153,9 @@ etl_ecommerce_data/
 │   │   ├── contract.py               # Kiểm tra hợp đồng cấu trúc cột và khóa chính trước khi nạp
 │   │   ├── evolution.py              # Tự động đồng bộ hóa cột mới phát sinh vào Bronze
 │   │   └── init_schema.py            # Khởi tạo DDL bảng Bronze (Append-Only mode)
-│   ├── validate/                     # Kiểm toán & đối soát dữ liệu (Quality Gate)
-│   │   ├── validate_source.py        # Đo lường số dòng và schema baseline của nguồn
-│   │   └── validate_target.py        # Kiểm toán số dòng Bronze đối chiếu với baseline nguồn
-│   └── transformation/               # Điều phối chuyển đổi dbt (T)
-│       └── dbt_runner.py             # Điều phối chạy dbt CLI và đồng bộ log dbt vào pipeline.log
+│   └── validate/                     # Kiểm toán & đối soát dữ liệu (Quality Gate)
+│       ├── validate_source.py        # Đo lường số dòng và schema baseline của nguồn
+│       └── validate_target.py        # Kiểm toán số dòng Bronze đối chiếu với baseline nguồn
 │
 ├── tests/                            # Bộ kiểm thử đơn vị Python (Unit Test Suite)
 │   └── test_unit_pipeline.py         # Test Schema Contract, Dynamic Query Builders, Checkpoint logic
@@ -251,51 +253,47 @@ etl_ecommerce_data/
    # Cấu hình hiệu năng pipeline
    ETL_MAX_WORKERS=4
    CHUNK_SIZE=25000
+
+   # Cấu hình Apache Airflow (Docker Compose)
+   AIRFLOW_UID=50000
+   AIRFLOW_PORT=8080
+   AIRFLOW_ADMIN_USER=admin
+   AIRFLOW_ADMIN_PASSWORD=admin
    ```
 
 ### 4.3. Cách Chạy Pipeline (Execution Options)
 
-#### Lựa chọn 1: Chạy trực tiếp trên Windows PowerShell
+#### Lựa chọn 1: Triển khai & Điều phối tự động bằng Apache Airflow + Docker Compose (Khuyên dùng)
+
+Khởi chạy trọn bộ cụm **SQL Server 2022 + PostgreSQL 16 + Apache Airflow 3.0** bằng một lệnh duy nhất (cần cấp Docker Desktop tối thiểu ~6 GB RAM):
+```powershell
+docker compose --env-file .env -f Docker/docker-compose.yml up -d --build
+```
+Sau khi khởi động xong, truy cập **http://localhost:8080** (tài khoản mặc định `admin` / `admin`), chọn DAG **`olist_medallion_elt`** và nhấn **Trigger DAG** (có thể bật `full_refresh: true` qua **Trigger DAG w/ config** để chạy `--full-refresh`, hoặc chờ lịch tự động lúc **02:00 sáng** hằng ngày giờ Việt Nam). Để dừng cụm, chạy:
+```powershell
+docker compose --env-file .env -f Docker/docker-compose.yml down
+```
+
+#### Lựa chọn 2: Chạy thủ công / Debug cục bộ trên Python (Windows PowerShell)
 
 ```powershell
-# 1. Chạy nạp dữ liệu tầng Bronze (Append-Only mode):
-.\.venv\Scripts\python.exe main.py
+# 1. Kiểm tra kết nối Source & Target Database (Preflight check):
+.\.venv\Scripts\python.exe main.py --preflight
 
-# 2. Chạy toàn bộ luồng End-to-End (Bronze -> Silver -> Gold -> Tests):
-.\.venv\Scripts\python.exe main.py --all
+# 2. Chạy nạp dữ liệu tầng Bronze (Append-Only mode):
+.\.venv\Scripts\python.exe main.py
 
 # 3. Chạy ở chế độ tuần tự (Sequential mode - dành cho máy cấu hình thấp):
 .\.venv\Scripts\python.exe main.py --sequential
 
-# 4. Chạy riêng lẻ các tầng dbt với định dạng log chuẩn hóa:
-.\.venv\Scripts\python.exe -m src.transformation.dbt_runner silver    # Chỉ chạy tầng Silver
-.\.venv\Scripts\python.exe -m src.transformation.dbt_runner snapshot  # Chạy dbt Snapshot (SCD Type 2)
-.\.venv\Scripts\python.exe -m src.transformation.dbt_runner gold      # Chỉ chạy tầng Gold
-.\.venv\Scripts\python.exe -m src.transformation.dbt_runner test      # Chạy toàn bộ bài test dbt
-```
-
-#### Lựa chọn 2: Sử dụng Unified CLI qua `run.sh` (Linux / macOS / Git Bash)
-
-```bash
-chmod +x run.sh
-
-# Chạy trọn vẹn toàn bộ pipeline:
-./run.sh pipeline
-
-# Hoặc chạy từng công đoạn riêng biệt:
-./run.sh extract-load        # Nạp dữ liệu vào Bronze
-./run.sh transform           # Chạy dbt Silver, Gold và Tests
-./run.sh transform-silver    # Chỉ chạy dbt Silver
-./run.sh transform-gold      # Chỉ chạy dbt Gold
-./run.sh test                # Chạy kiểm thử chất lượng dữ liệu
-./run.sh clean               # Dọn dẹp cache biên dịch của dbt
-```
-
-#### Lựa chọn 3: Triển khai toàn bộ cụm qua Docker Compose
-
-Khởi chạy đồng thời cả cụm 3 container gồm Microsoft SQL Server 2022 (OLTP), PostgreSQL 16 (DWH) và ETL Engine container (đã cấu hình chạy dưới người dùng non-root an toàn):
-```bash
-docker compose --env-file .env -f Docker/docker-compose.yml up --build
+# 4. Chạy các bước biến đổi & kiểm định dbt trực tiếp:
+cd dbt_transform
+..\.venv\Scripts\dbt.exe run --select staging                   # Chỉ chạy tầng Silver
+..\.venv\Scripts\dbt.exe test --select staging source:*         # Chạy Quality Gate tầng Silver & Source
+..\.venv\Scripts\dbt.exe snapshot                               # Chạy dbt Snapshot (SCD Type 2)
+..\.venv\Scripts\dbt.exe run --select marts                     # Chỉ chạy tầng Gold
+..\.venv\Scripts\dbt.exe test --exclude staging source:*        # Chạy Quality Gate tầng Gold
+cd ..
 ```
 
 ---
@@ -323,9 +321,9 @@ Kiểm tra tính hợp lệ của hợp đồng Schema, câu truy vấn trích x
 ### 5.3. Chạy Kiểm thử Chất lượng Dữ liệu dbt
 Thực thi toàn bộ các bài test schema và quy tắc nghiệp vụ:
 ```powershell
-.\.venv\Scripts\python.exe -m src.transformation.dbt_runner test
-# Hoặc qua run.sh:
-./run.sh test
+cd dbt_transform
+..\.venv\Scripts\dbt.exe test
+cd ..
 ```
 *Lưu ý: Bất kỳ bản ghi nào vi phạm quy tắc kiểm thử sẽ được dbt tự động ghi nhận vào schema `test_failures` trên PostgreSQL để kỹ sư dữ liệu dễ dàng truy vết nguyên nhân gốc rễ (Root Cause Analysis).*
 
