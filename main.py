@@ -8,10 +8,8 @@ from src.core.connection import get_source_engine, get_target_engine, test_conne
 from src.core.logger import get_logger
 from src.ingestion.extract import build_dynamic_query, extract_from_sqlserver, extract_table
 from src.ingestion.load import load_single_table
-from src.schema import (
-    SchemaValidationError,
-    init_bronze_schema,
-)
+from src.schema.contract import SchemaValidationError
+from src.schema.init_schema import init_bronze_schema
 from src.state.history import save_pipeline_run_history
 from src.state.state_manager import (
     get_active_checkpoints,
@@ -19,7 +17,8 @@ from src.state.state_manager import (
     mark_all_checkpoints_completed,
 )
 from src.state.watermark import get_watermark_states
-from src.validate import measure_source_baseline, validate_staging_against_baseline
+from src.validate.validate_source import measure_source_baseline
+from src.validate.validate_target import validate_staging_against_baseline
 
 logger = get_logger(__name__)
 

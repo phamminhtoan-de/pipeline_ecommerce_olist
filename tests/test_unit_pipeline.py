@@ -90,7 +90,7 @@ class TestSchemaContractAndEvolution(unittest.TestCase):
         self.assertIn("[order_purchase_timestamp] >= '2017-01-01' AND [order_purchase_timestamp] < '2018-01-01'", q_dr)
 
     def test_checkpoint_schema_and_table_definitions(self):
-        from src.state import CHECKPOINT_SCHEMA, CHECKPOINT_TABLE, CHUNK_LOG_TABLE
+        from src.state.state_manager import CHECKPOINT_SCHEMA, CHECKPOINT_TABLE, CHUNK_LOG_TABLE
         self.assertEqual(CHECKPOINT_SCHEMA, "etl_metadata")
         self.assertEqual(CHECKPOINT_TABLE, "_pipeline_checkpoints")
         self.assertEqual(CHUNK_LOG_TABLE, "_pipeline_chunk_checkpoints")

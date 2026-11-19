@@ -7,7 +7,7 @@ from src.state.watermark import get_watermark_states, upsert_watermark_state
 from src.state.state_manager import record_chunk_checkpoint_in_tx
 from src.config.settings import STAGING_DDL_SQL_PATH, TGT_DB_SCHEMA
 from src.core.logger import get_logger
-from src.schema import sync_target_schema_evolution
+from src.schema.evolution import sync_target_schema_evolution
 
 logger = get_logger(__name__)
 
