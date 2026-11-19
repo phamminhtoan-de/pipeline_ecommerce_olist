@@ -117,9 +117,19 @@ with DAG(
         ),
     },
 ) as dag:
-    check_connections = BashOperator(
-        task_id="check_connections",
-        bash_command=f"{ETL_PYTHON} main.py --preflight",
+    check_source_sqlserver = BashOperator(
+        task_id="check_source_sqlserver",
+        bash_command=f"{ETL_PYTHON} main.py --preflight-source",
+        cwd=PROJECT_DIR,
+        retries=3,
+        retry_delay=timedelta(seconds=15),
+        retry_exponential_backoff=True,
+        max_retry_delay=timedelta(minutes=2),
+    )
+
+    check_target_postgres = BashOperator(
+        task_id="check_target_postgres",
+        bash_command=f"{ETL_PYTHON} main.py --preflight-target",
         cwd=PROJECT_DIR,
         retries=3,
         retry_delay=timedelta(seconds=15),
@@ -263,10 +273,10 @@ with DAG(
                 retries=0,
             )
 
-    check_connections >> [init_bronze_schema, dbt_deps]
-    init_bronze_schema >> extract_load_bronze
-    extract_load_bronze >> validate_bronze
-    [extract_load_bronze, dbt_deps] >> [dbt_test_bronze_source, dbt_source_freshness]
+    check_target_postgres >> init_bronze_schema
+    [check_source_sqlserver, init_bronze_schema] >> extract_load_bronze
+    extract_load_bronze >> [validate_bronze, dbt_test_bronze_source, dbt_source_freshness]
+    dbt_deps >> [dbt_test_bronze_source, dbt_source_freshness]
     [validate_bronze, dbt_test_bronze_source] >> dbt_silver
     dbt_silver >> dbt_test_silver >> dbt_snapshot >> dbt_gold
     dbt_gold >> [dbt_test_gold_schema, dbt_test_business_rules]

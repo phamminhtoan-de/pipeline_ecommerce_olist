@@ -60,7 +60,8 @@ class TestAirflowOrchestration(unittest.TestCase):
         self.assertEqual(
             task_ids,
             [
-                "check_connections",
+                "check_source_sqlserver",
+                "check_target_postgres",
                 "init_bronze_schema",
                 "dbt_deps",
                 "validate_bronze",
@@ -92,12 +93,19 @@ class TestAirflowOrchestration(unittest.TestCase):
         self.assertEqual(constants.get("GOLD_FACT_MODELS"), ["fact_orders", "fact_sales"])
         self.assertEqual(len(constants.get("GOLD_BUSINESS_RULES", [])), 6)
 
+        for node in ast.walk(tree):
+            if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.RShift, ast.LShift)):
+                self.assertFalse(
+                    isinstance(node.left, ast.List) and isinstance(node.right, ast.List),
+                    "Không được nối trực tiếp list >> list trong Airflow DAG",
+                )
+
         compact_source = " ".join(source.split())
         for dep_edge in (
-            "check_connections >> [init_bronze_schema, dbt_deps]",
-            "init_bronze_schema >> extract_load_bronze",
-            "extract_load_bronze >> validate_bronze",
-            "[extract_load_bronze, dbt_deps] >> [dbt_test_bronze_source, dbt_source_freshness]",
+            "check_target_postgres >> init_bronze_schema",
+            "[check_source_sqlserver, init_bronze_schema] >> extract_load_bronze",
+            "extract_load_bronze >> [validate_bronze, dbt_test_bronze_source, dbt_source_freshness]",
+            "dbt_deps >> [dbt_test_bronze_source, dbt_source_freshness]",
             "[validate_bronze, dbt_test_bronze_source] >> dbt_silver",
             "dbt_silver >> dbt_test_silver >> dbt_snapshot >> dbt_gold",
             "dbt_gold >> [dbt_test_gold_schema, dbt_test_business_rules]",
@@ -105,7 +113,8 @@ class TestAirflowOrchestration(unittest.TestCase):
             self.assertIn(dep_edge, compact_source)
 
         for expected_flag in (
-            "--preflight",
+            "--preflight-source",
+            "--preflight-target",
             "--init-schema",
             "--table {table_name} --skip-validate --run-id",
             "--validate-only --run-id",
@@ -144,6 +153,33 @@ class TestAirflowOrchestration(unittest.TestCase):
         mock_test_conn.assert_called_once()
         mock_init_schema.assert_not_called()
         mock_src_engine.return_value.dispose.assert_called_once()
+        mock_tgt_engine.return_value.dispose.assert_called_once()
+
+    def test_main_preflight_source_and_target_separately(self):
+        import main
+
+        with patch.object(sys, "argv", ["main.py", "--preflight-source"]), \
+             patch.object(main, "test_source_connection") as mock_src_conn, \
+             patch.object(main, "test_target_connection") as mock_tgt_conn, \
+             patch.object(main, "get_source_engine") as mock_src_engine, \
+             patch.object(main, "get_target_engine") as mock_tgt_engine:
+            main.main()
+
+        mock_src_conn.assert_called_once()
+        mock_tgt_conn.assert_not_called()
+        mock_src_engine.return_value.dispose.assert_called_once()
+        mock_tgt_engine.return_value.dispose.assert_not_called()
+
+        with patch.object(sys, "argv", ["main.py", "--preflight-target"]), \
+             patch.object(main, "test_source_connection") as mock_src_conn, \
+             patch.object(main, "test_target_connection") as mock_tgt_conn, \
+             patch.object(main, "get_source_engine") as mock_src_engine, \
+             patch.object(main, "get_target_engine") as mock_tgt_engine:
+            main.main()
+
+        mock_src_conn.assert_not_called()
+        mock_tgt_conn.assert_called_once()
+        mock_src_engine.return_value.dispose.assert_not_called()
         mock_tgt_engine.return_value.dispose.assert_called_once()
 
     def test_main_preflight_init_schema_initializes_bronze_and_metadata(self):

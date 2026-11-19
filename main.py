@@ -9,7 +9,13 @@ import time
 from datetime import datetime, timezone
 from src.config.settings import ETL_MAX_WORKERS, EXTRACT_PIPELINE_RULES, LOGS_DIR, TGT_DB_SCHEMA
 from src.core.alert import send_alert_webhook
-from src.core.connection import get_source_engine, get_target_engine, test_connections
+from src.core.connection import (
+    get_source_engine,
+    get_target_engine,
+    test_connections,
+    test_source_connection,
+    test_target_connection,
+)
 from src.core.logger import get_logger
 from src.ingestion.extract import build_dynamic_query, extract_from_sqlserver, extract_table
 from src.ingestion.load import load_single_table
@@ -101,6 +107,16 @@ def _load_validation_snapshots(run_id, expected_tables):
 def _parse_cli_args(argv=None):
     parser = argparse.ArgumentParser(description="Olist E-Commerce Medallion Bronze Pipeline")
     parser.add_argument("--preflight", action="store_true", help="Kiểm tra kết nối Source và Target DB rồi thoát")
+    parser.add_argument(
+        "--preflight-source",
+        action="store_true",
+        help="Chỉ kiểm tra kết nối Source DB (SQL Server) rồi thoát",
+    )
+    parser.add_argument(
+        "--preflight-target",
+        action="store_true",
+        help="Chỉ kiểm tra kết nối Target DB (PostgreSQL) rồi thoát",
+    )
     parser.add_argument(
         "--init-schema",
         action="store_true",
@@ -228,6 +244,40 @@ def main():
                 get_source_engine().dispose()
             except Exception:
                 pass
+            try:
+                get_target_engine().dispose()
+            except Exception:
+                pass
+
+    elif args.preflight_source:
+        logger.info("🔍 Đang kiểm tra kết nối Source Database (SQL Server)...")
+        try:
+            test_source_connection()
+            logger.info("✅ Kết nối Source Database (SQL Server) sẵn sàng!")
+            return
+        except Exception as exc:
+            err_msg = f"💥 Lỗi kết nối Source Database (SQL Server): {exc}"
+            logger.error(err_msg)
+            send_alert_webhook(err_msg)
+            sys.exit(1)
+        finally:
+            try:
+                get_source_engine().dispose()
+            except Exception:
+                pass
+
+    elif args.preflight_target:
+        logger.info("🔍 Đang kiểm tra kết nối Target Database (PostgreSQL)...")
+        try:
+            test_target_connection()
+            logger.info("✅ Kết nối Target Database (PostgreSQL) sẵn sàng!")
+            return
+        except Exception as exc:
+            err_msg = f"💥 Lỗi kết nối Target Database (PostgreSQL): {exc}"
+            logger.error(err_msg)
+            send_alert_webhook(err_msg)
+            sys.exit(1)
+        finally:
             try:
                 get_target_engine().dispose()
             except Exception:
