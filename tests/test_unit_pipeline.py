@@ -1,5 +1,9 @@
+import ast
+from pathlib import Path
+import sys
 import unittest
-from datetime import datetime
+from datetime import datetime, timezone
+from unittest.mock import patch
 from src.ingestion.extract import build_dynamic_query, resolve_table_name
 from src.schema.contract import (
     SchemaValidationError,
@@ -95,32 +99,116 @@ class TestSchemaContractAndEvolution(unittest.TestCase):
         self.assertEqual(CHECKPOINT_TABLE, "_pipeline_checkpoints")
         self.assertEqual(CHUNK_LOG_TABLE, "_pipeline_chunk_checkpoints")
 
-    def test_dbt_runner_strip_ansi_and_error_capture(self):
-        from src.transformation.dbt_runner import _format_and_log_dbt_line, strip_ansi
 
-        raw_line = "\x1b[0m17:20:50  1 of 7 OK created sql incremental model silver.stg_sellers \x1b[32mSELECT 3095\x1b[0m in 0.24s]"
-        self.assertNotIn("\x1b", strip_ansi(raw_line))
+class TestAirflowOrchestration(unittest.TestCase):
+    def test_airflow_dag_ast_structure_and_tasks(self):
+        dag_path = Path(__file__).resolve().parents[1] / "airflow" / "dags" / "olist_medallion_elt.py"
+        source = dag_path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(dag_path))
 
-        errors = []
-        _format_and_log_dbt_line(
-            "17:20:51  1 of 1 ERROR snapshotting silver.snp_sellers ........................ [ERROR in 0.12s]",
-            "DBT SNAPSHOT",
-            error_details=errors,
+        dag_call = None
+        task_ids = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                func_name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+                if func_name == "DAG":
+                    dag_call = node
+                elif func_name == "BashOperator":
+                    for kw in node.keywords:
+                        if kw.arg == "task_id" and isinstance(kw.value, ast.Constant):
+                            task_ids.append(kw.value.value)
+
+        self.assertIsNotNone(dag_call, "Không tìm thấy khai báo DAG trong olist_medallion_elt.py")
+        dag_kwargs = {
+            kw.arg: kw.value.value
+            for kw in dag_call.keywords
+            if kw.arg and isinstance(kw.value, ast.Constant)
+        }
+        self.assertEqual(dag_kwargs.get("dag_id"), "olist_medallion_elt")
+        self.assertEqual(dag_kwargs.get("schedule"), "0 2 * * *")
+        self.assertIs(dag_kwargs.get("catchup"), False)
+        self.assertEqual(dag_kwargs.get("max_active_runs"), 1)
+
+        expected_tasks = [
+            "preflight_check",
+            "extract_load_bronze",
+            "dbt_silver",
+            "dbt_test_silver",
+            "dbt_snapshot",
+            "dbt_gold",
+            "dbt_test_gold",
+        ]
+        self.assertEqual(task_ids, expected_tasks)
+
+        expected_chain = " >> ".join(expected_tasks)
+        compact_source = " ".join(source.split())
+        self.assertIn(expected_chain, compact_source)
+        self.assertIn("dbt.cli.main", source)
+        self.assertNotIn("src.transformation.dbt_runner", source)
+
+    def test_main_preflight_checks_connections_and_exits_early(self):
+        import main
+
+        with patch.object(sys, "argv", ["main.py", "--preflight"]), \
+             patch.object(main, "test_connections") as mock_test_conn, \
+             patch.object(main, "init_bronze_schema") as mock_init_schema, \
+             patch.object(main, "get_source_engine") as mock_src_engine, \
+             patch.object(main, "get_target_engine") as mock_tgt_engine:
+            main.main()
+
+        mock_test_conn.assert_called_once()
+        mock_init_schema.assert_not_called()
+        mock_src_engine.return_value.dispose.assert_called_once()
+        mock_tgt_engine.return_value.dispose.assert_called_once()
+
+    def test_build_dynamic_query_resume_and_deterministic_order_by(self):
+        wm_rule = {
+            "strategy": "watermark",
+            "watermark_column": "order_purchase_timestamp",
+            "default_start_watermark": "2017-01-01 00:00:00",
+            "primary_keys": ["order_id"],
+            "resume_in_progress": True,
+        }
+        q_resume = build_dynamic_query(
+            logical_name="orders",
+            sql_table_name="olist_orders_dataset",
+            rule=wm_rule,
+            last_watermark="2018-01-01 00:00:00",
+            resolved_columns=["order_id", "order_purchase_timestamp"],
+            batch_time=datetime(2018, 6, 1, 12, 0, 0),
         )
-        _format_and_log_dbt_line(
-            "17:20:51  Database Error in model fact_sales (models/marts/fact_sales.sql)",
-            "DBT GOLD",
-            error_details=errors,
-        )
-        _format_and_log_dbt_line(
-            "  LINE 15: division by zero",
-            "DBT GOLD",
-            error_details=errors,
-        )
-        self.assertEqual(len(errors), 3)
-        self.assertIn("silver.snp_sellers", errors[0])
-        self.assertIn("Database Error in model fact_sales", errors[1])
-        self.assertIn("LINE 15: division by zero", errors[2])
+        self.assertIn("[order_purchase_timestamp] >= '2018-01-01 00:00:00'", q_resume)
+        self.assertIn("ORDER BY [order_purchase_timestamp] ASC, [order_id] ASC", q_resume)
+
+    def test_build_dynamic_query_timezone_aware_cutoff(self):
+        import src.ingestion.extract as extract_mod
+
+        wm_rule = {
+            "strategy": "watermark",
+            "watermark_column": "order_purchase_timestamp",
+            "default_start_watermark": "2017-01-01 00:00:00",
+            "primary_keys": ["order_id"],
+        }
+        with patch.object(extract_mod, "SRC_DB_TIMEZONE", "Asia/Ho_Chi_Minh"):
+            q_tz = build_dynamic_query(
+                logical_name="orders",
+                sql_table_name="olist_orders_dataset",
+                rule=wm_rule,
+                last_watermark="2026-01-01 00:00:00",
+                resolved_columns=["order_id", "order_purchase_timestamp"],
+                batch_time=datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc),
+            )
+        self.assertIn("AND [order_purchase_timestamp] <= '2026-06-01 19:00:00'", q_tz)
+
+    def test_alert_webhook_respects_alert_on_script_error_flag(self):
+        import src.core.alert as alert_mod
+
+        with patch.object(alert_mod, "ALERT_ON_SCRIPT_ERROR", False), \
+             patch.object(alert_mod, "ALERT_WEBHOOK_URL", "https://example.com/webhook"), \
+             patch.object(alert_mod.urllib.request, "urlopen") as mock_urlopen:
+            alert_mod.send_alert_webhook("test error")
+
+        mock_urlopen.assert_not_called()
 
 
 if __name__ == "__main__":
