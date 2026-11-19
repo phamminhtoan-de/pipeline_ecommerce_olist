@@ -34,13 +34,19 @@ Dự án áp dụng kiến trúc **Medallion (Lakehouse-style)** nhằm giải q
 flowchart TD
     subgraph S0["0. Orchestration Layer (Apache Airflow 3.1 - LocalExecutor & TaskGroups)"]
         direction LR
-        AF_PF["1. preflight_check<br/>(--preflight --init-schema)"] --> AF_EL["2. TaskGroup: extract_load_bronze<br/>(7 parallel bronze_&lt;table&gt; tasks)"]
-        AF_EL --> AF_DP["3. dbt_deps"]
-        AF_DP --> AF_SLV["4. TaskGroup: dbt_silver<br/>(7 parallel silver_&lt;model&gt; tasks)"]
-        AF_SLV --> AF_TS["5. dbt_test_silver<br/>(Quality Gate 1)"]
-        AF_TS --> AF_SNP["6. dbt_snapshot<br/>(snp_sellers SCD2)"]
-        AF_SNP --> AF_GLD["7. TaskGroup: dbt_gold<br/>(Dim -> Fact Star Schema)"]
-        AF_GLD --> AF_TG["8. dbt_test_gold<br/>(Quality Gate 2)"]
+        AF_CHK["1. check_connections<br/>(--preflight)"] --> AF_INIT["2a. init_bronze_schema<br/>(--init-schema)"]
+        AF_CHK --> AF_DP["2b. dbt_deps"]
+        AF_INIT --> AF_EL["3. TaskGroup: extract_load_bronze<br/>(7 parallel bronze_&lt;table&gt; --skip-validate)"]
+        AF_EL --> AF_VAL["4a. validate_bronze<br/>(--validate-only --run-id)"]
+        AF_EL --> AF_TB["4b. dbt_test_bronze_source<br/>(source:*)"]
+        AF_DP --> AF_TB
+        AF_VAL --> AF_SLV["5. TaskGroup: dbt_silver<br/>(7 parallel silver_&lt;model&gt; tasks)"]
+        AF_TB --> AF_SLV
+        AF_SLV --> AF_TS["6. dbt_test_silver<br/>(staging --exclude source:*)"]
+        AF_TS --> AF_SNP["7. dbt_snapshot<br/>(snp_sellers SCD2)"]
+        AF_SNP --> AF_GLD["8. TaskGroup: dbt_gold<br/>(Dim -> Fact Star Schema)"]
+        AF_GLD --> AF_TGS["9a. dbt_test_gold_schema<br/>(marts,test_type:generic)"]
+        AF_GLD --> AF_TBR["9b. dbt_test_business_rules<br/>(test_type:singular)"]
     end
 
     subgraph S1["1. Upstream OLTP Layer (Windows Host)"]
@@ -122,12 +128,12 @@ etl_ecommerce_data/
 ├── .gitignore                        # Danh sách loại trừ khỏi git (venv, logs, credentials)
 ├── requirements.txt                  # Danh mục thư viện Python
 ├── docker-compose.yml                # Điều phối cụm Apache Airflow 3.1 (kết nối DB nguồn/đích qua host.docker.internal)
-├── main.py                           # Entrypoint kiểm tra (--preflight --init-schema) & nạp Bronze (toàn bộ hoặc --table)
+├── main.py                           # Entrypoint kiểm tra kết nối (--preflight), tạo schema (--init-schema), nạp (--table, --skip-validate) & đối soát (--validate-only)
 │
 ├── airflow/                          # Bộ điều phối Apache Airflow 3.1 (LocalExecutor)
 │   ├── Dockerfile                    # Image Airflow 3.1 + ODBC Driver 18 + /opt/etl_venv độc lập
 │   └── dags/
-│       └── olist_medallion_elt.py    # DAG TaskGroup chi tiết theo bảng/model: Preflight -> 7 Bronze -> dbt Silver/Gold -> Test
+│       └── olist_medallion_elt.py    # DAG TaskGroup tách từng tầng: Check -> Init/Deps -> 7 Bronze -> Validate/Source Test -> Silver -> Gold -> Schema/Business Rules Tests
 │
 ├── logs/
 │   ├── pipeline.log                  # Log tiến trình Extract & Load Python (chuẩn UTC, xoay vòng 10MB)
@@ -292,23 +298,27 @@ docker compose down
 #### Lựa chọn 2: Chạy thủ công / Debug cục bộ trên Python (Windows PowerShell)
 
 ```powershell
-# 1. Kiểm tra kết nối Source & Target Database (Preflight check + khởi tạo schema nếu cần):
-.\.venv\Scripts\python.exe main.py --preflight --init-schema
+# 1. Kiểm tra kết nối & khởi tạo trước schema Bronze + bảng metadata (nếu cần):
+.\.venv\Scripts\python.exe main.py --preflight
+.\.venv\Scripts\python.exe main.py --init-schema
 
-# 2. Chạy nạp dữ liệu tầng Bronze (Append-Only mode) — toàn bộ hoặc riêng từng bảng:
+# 2. Chạy nạp dữ liệu tầng Bronze (Append-Only mode) — toàn bộ hoặc tách bước nạp/đối soát:
 .\.venv\Scripts\python.exe main.py
-.\.venv\Scripts\python.exe main.py --table orders
+.\.venv\Scripts\python.exe main.py --table orders --skip-validate --run-id local_run_1
+.\.venv\Scripts\python.exe main.py --validate-only --table orders --run-id local_run_1
 
 # 3. Chạy ở chế độ tuần tự (Sequential mode - dành cho máy cấu hình thấp):
 .\.venv\Scripts\python.exe main.py --sequential
 
 # 4. Chạy các bước biến đổi & kiểm định dbt trực tiếp:
 cd dbt_transform
+..\.venv\Scripts\dbt.exe test --select source:*                 # Kiểm tra dữ liệu thô tầng Bronze
 ..\.venv\Scripts\dbt.exe run --select staging                   # Chỉ chạy tầng Silver
-..\.venv\Scripts\dbt.exe test --select staging source:*         # Chạy Quality Gate tầng Silver & Source
+..\.venv\Scripts\dbt.exe test --select staging --exclude source:*  # Quality Gate tầng Silver
 ..\.venv\Scripts\dbt.exe snapshot                               # Chạy dbt Snapshot (SCD Type 2)
 ..\.venv\Scripts\dbt.exe run --select marts                     # Chỉ chạy tầng Gold
-..\.venv\Scripts\dbt.exe test --exclude staging source:*        # Chạy Quality Gate tầng Gold
+..\.venv\Scripts\dbt.exe test --select marts,test_type:generic  # Kiểm tra PK/FK/relationships tầng Gold
+..\.venv\Scripts\dbt.exe test --select test_type:singular       # Kiểm tra 6 Business Rules tầng Gold
 cd ..
 ```
 
