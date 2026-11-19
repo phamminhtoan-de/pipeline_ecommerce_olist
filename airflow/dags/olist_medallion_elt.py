@@ -109,14 +109,32 @@ with DAG(
         ),
     },
 ) as dag:
-    preflight_check = BashOperator(
-        task_id="preflight_check",
-        bash_command=f"{ETL_PYTHON} main.py --preflight --init-schema",
+    check_connections = BashOperator(
+        task_id="check_connections",
+        bash_command=f"{ETL_PYTHON} main.py --preflight",
         cwd=PROJECT_DIR,
         retries=3,
         retry_delay=timedelta(seconds=15),
         retry_exponential_backoff=True,
         max_retry_delay=timedelta(minutes=2),
+    )
+
+    init_bronze_schema = BashOperator(
+        task_id="init_bronze_schema",
+        bash_command=f"{ETL_PYTHON} main.py --init-schema",
+        cwd=PROJECT_DIR,
+        retries=2,
+        retry_delay=timedelta(seconds=15),
+        retry_exponential_backoff=True,
+        max_retry_delay=timedelta(minutes=2),
+    )
+
+    dbt_deps = BashOperator(
+        task_id="dbt_deps",
+        bash_command=DBT_ENSURE_DEPS,
+        cwd=DBT_PROJECT_DIR,
+        retries=1,
+        retry_delay=timedelta(seconds=30),
     )
 
     with TaskGroup(
@@ -126,7 +144,7 @@ with DAG(
         for table_name in BRONZE_TABLES:
             BashOperator(
                 task_id=f"bronze_{table_name}",
-                bash_command=f"{ETL_PYTHON} main.py --table {table_name}",
+                bash_command=f'{ETL_PYTHON} main.py --table {table_name} --skip-validate --run-id "{{{{ run_id }}}}"',
                 cwd=PROJECT_DIR,
                 retries=2,
                 retry_delay=timedelta(minutes=1),
@@ -134,12 +152,19 @@ with DAG(
                 max_retry_delay=timedelta(minutes=5),
             )
 
-    dbt_deps = BashOperator(
-        task_id="dbt_deps",
-        bash_command=DBT_ENSURE_DEPS,
-        cwd=DBT_PROJECT_DIR,
+    validate_bronze = BashOperator(
+        task_id="validate_bronze",
+        bash_command=f'{ETL_PYTHON} main.py --validate-only --run-id "{{{{ run_id }}}}"',
+        cwd=PROJECT_DIR,
         retries=1,
         retry_delay=timedelta(seconds=30),
+    )
+
+    dbt_test_bronze_source = BashOperator(
+        task_id="dbt_test_bronze_source",
+        bash_command=f"{DBT_CLI} test --select source:* --target-path /tmp/dbt_test_bronze_source",
+        cwd=DBT_PROJECT_DIR,
+        retries=0,
     )
 
     with TaskGroup(
@@ -160,7 +185,7 @@ with DAG(
 
     dbt_test_silver = BashOperator(
         task_id="dbt_test_silver",
-        bash_command=f"{DBT_CLI} test --select staging source:*",
+        bash_command=f"{DBT_CLI} test --select staging --exclude source:* --target-path /tmp/dbt_test_silver",
         cwd=DBT_PROJECT_DIR,
         retries=0,
     )
@@ -204,20 +229,24 @@ with DAG(
             gold_tasks["dim_seller"],
         ] >> gold_tasks["fact_sales"]
 
-    dbt_test_gold = BashOperator(
-        task_id="dbt_test_gold",
-        bash_command=f"{DBT_CLI} test --exclude staging source:*",
+    dbt_test_gold_schema = BashOperator(
+        task_id="dbt_test_gold_schema",
+        bash_command=f"{DBT_CLI} test --select marts,test_type:generic --target-path /tmp/dbt_test_gold_schema",
         cwd=DBT_PROJECT_DIR,
         retries=0,
     )
 
-    (
-        preflight_check
-        >> extract_load_bronze
-        >> dbt_deps
-        >> dbt_silver
-        >> dbt_test_silver
-        >> dbt_snapshot
-        >> dbt_gold
-        >> dbt_test_gold
+    dbt_test_business_rules = BashOperator(
+        task_id="dbt_test_business_rules",
+        bash_command=f"{DBT_CLI} test --select test_type:singular --target-path /tmp/dbt_test_business_rules",
+        cwd=DBT_PROJECT_DIR,
+        retries=0,
     )
+
+    check_connections >> [init_bronze_schema, dbt_deps]
+    init_bronze_schema >> extract_load_bronze
+    extract_load_bronze >> validate_bronze
+    [extract_load_bronze, dbt_deps] >> dbt_test_bronze_source
+    [validate_bronze, dbt_test_bronze_source] >> dbt_silver
+    dbt_silver >> dbt_test_silver >> dbt_snapshot >> dbt_gold
+    dbt_gold >> [dbt_test_gold_schema, dbt_test_business_rules]

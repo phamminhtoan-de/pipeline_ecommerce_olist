@@ -1,9 +1,13 @@
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import json
+import os
+from pathlib import Path
+import re
 import sys
 import time
 from datetime import datetime, timezone
-from src.config.settings import ETL_MAX_WORKERS, EXTRACT_PIPELINE_RULES, TGT_DB_SCHEMA
+from src.config.settings import ETL_MAX_WORKERS, EXTRACT_PIPELINE_RULES, LOGS_DIR, TGT_DB_SCHEMA
 from src.core.alert import send_alert_webhook
 from src.core.connection import get_source_engine, get_target_engine, test_connections
 from src.core.logger import get_logger
@@ -43,13 +47,80 @@ def ensure_all_tables_loaded(pipeline_stats, required_tables=None):
         )
 
 
+def _sanitize_run_id(run_id):
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", str(run_id)).strip("_") or "default"
+
+
+def _run_state_dir(run_id):
+    return LOGS_DIR / "run_state" / _sanitize_run_id(run_id)
+
+
+def _save_validation_snapshots(run_id, source_baseline, pipeline_stats):
+    state_dir = _run_state_dir(run_id)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    for logical_name, base_info in source_baseline.items():
+        payload = {
+            "baseline": {
+                "actual_table_name": base_info.get("actual_table_name"),
+                "target_table_name": base_info.get("target_table_name"),
+                "strategy": base_info.get("strategy"),
+                "source_row_count": base_info.get("source_row_count"),
+                "expected_extract_rows": base_info.get("expected_extract_rows"),
+                "expected_columns": list(base_info.get("expected_columns", [])),
+                "date_range": base_info.get("date_range"),
+            },
+            "stat": pipeline_stats.get(logical_name),
+        }
+        target_path = state_dir / f"{logical_name}.json"
+        tmp_path = state_dir / f"{logical_name}.{os.getpid()}.json.tmp"
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp_path, target_path)
+    return state_dir
+
+
+def _load_validation_snapshots(run_id, expected_tables):
+    state_dir = _run_state_dir(run_id)
+    source_baseline = {}
+    pipeline_stats = {}
+    missing = []
+    for logical_name in expected_tables:
+        snapshot_path = state_dir / f"{logical_name}.json"
+        if not snapshot_path.exists():
+            missing.append(logical_name)
+            continue
+        data = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        source_baseline[logical_name] = data["baseline"]
+        if data.get("stat") is not None:
+            pipeline_stats[logical_name] = data["stat"]
+
+    if missing:
+        raise RuntimeError(f"Thiếu file snapshot đối soát cho bảng {missing} trong run_id='{run_id}'")
+    return source_baseline, pipeline_stats
+
+
 def _parse_cli_args(argv=None):
     parser = argparse.ArgumentParser(description="Olist E-Commerce Medallion Bronze Pipeline")
     parser.add_argument("--preflight", action="store_true", help="Kiểm tra kết nối Source và Target DB rồi thoát")
     parser.add_argument(
         "--init-schema",
         action="store_true",
-        help="Khởi tạo trước schema Bronze và bảng metadata (dùng cùng --preflight)",
+        help="Khởi tạo trước schema Bronze và bảng metadata (chạy độc lập hoặc cùng --preflight)",
+    )
+    parser.add_argument(
+        "--skip-validate",
+        action="store_true",
+        help="Bỏ qua bước đối chiếu Bronze trong tiến trình EL để chạy ở task validate riêng",
+    )
+    parser.add_argument(
+        "--validate-only",
+        action="store_true",
+        help="Chỉ chạy đối chiếu tầng Bronze với baseline nguồn",
+    )
+    parser.add_argument(
+        "--run-id",
+        type=str,
+        default=None,
+        help="Định danh lần chạy dùng để lưu/đọc snapshot baseline giữa task EL và task validate",
     )
     parser.add_argument("--sequential", action="store_true", help="Chạy tuần tự thay vì ThreadPoolExecutor")
     parser.add_argument(
@@ -162,6 +233,79 @@ def main():
             except Exception:
                 pass
 
+    elif args.init_schema:
+        logger.info("🛠️ Đang khởi tạo độc lập schema Bronze và metadata (--init-schema)...")
+        tgt_engine = None
+        try:
+            tgt_engine = get_target_engine()
+            init_bronze_schema(tgt_engine, target_schema=TGT_DB_SCHEMA)
+            init_checkpoint_manager(tgt_engine)
+            get_watermark_states(tgt_engine, tgt_schema=TGT_DB_SCHEMA)
+            logger.info("✅ Khởi tạo schema Bronze và metadata hoàn tất!")
+            return
+        except Exception as exc:
+            err_msg = f"💥 Lỗi khởi tạo schema Bronze (--init-schema): {exc}"
+            logger.error(err_msg)
+            send_alert_webhook(err_msg)
+            sys.exit(1)
+        finally:
+            if tgt_engine is not None:
+                try:
+                    tgt_engine.dispose()
+                except Exception:
+                    pass
+
+    elif args.validate_only:
+        expected_tables = (
+            [t for t in target_tables if t in REQUIRED_TABLES] if target_tables is not None else REQUIRED_TABLES
+        )
+        scope_label = "toàn bộ 7 bảng" if target_tables is None else target_tables
+        logger.info(f"🔍 Đang chạy đối chiếu tầng Bronze với baseline ({scope_label})...")
+        tgt_engine = None
+        try:
+            tgt_engine = get_target_engine()
+            if args.run_id:
+                source_baseline, pipeline_stats = _load_validation_snapshots(args.run_id, expected_tables)
+            else:
+                test_connections()
+                active_checkpoints = get_active_checkpoints(tgt_engine)
+                in_progress_tables = {
+                    name for name, cp in active_checkpoints.items() if cp.get("status") == "IN_PROGRESS"
+                }
+                watermark_states = get_watermark_states(tgt_engine, tgt_schema=TGT_DB_SCHEMA)
+                source_baseline = measure_source_baseline(
+                    watermark_states=watermark_states,
+                    batch_time=datetime.now(timezone.utc),
+                    in_progress_tables=in_progress_tables,
+                    target_tables=target_tables,
+                )
+                pipeline_stats = {}
+
+            validate_staging_against_baseline(
+                source_baseline=source_baseline,
+                pipeline_stats=pipeline_stats,
+                tgt_schema=TGT_DB_SCHEMA,
+                tgt_engine=tgt_engine,
+            )
+            logger.info("✅ Đối chiếu tầng Bronze hoàn tất!")
+            return
+        except Exception as exc:
+            err_msg = f"💥 Lỗi đối chiếu tầng Bronze (--validate-only): {exc}"
+            logger.error(err_msg)
+            send_alert_webhook(err_msg)
+            sys.exit(1)
+        finally:
+            if not args.run_id:
+                try:
+                    get_source_engine().dispose()
+                except Exception:
+                    pass
+            if tgt_engine is not None:
+                try:
+                    tgt_engine.dispose()
+                except Exception:
+                    pass
+
     pipeline_start = time.time()
     batch_time = datetime.now(timezone.utc)
     batch_id = batch_time.strftime("%Y%m%d_%H%M%S")
@@ -256,12 +400,16 @@ def main():
 
         ensure_all_tables_loaded(pipeline_stats, required_tables=expected_tables)
 
-        validate_staging_against_baseline(
-            source_baseline=source_baseline,
-            pipeline_stats=pipeline_stats,
-            tgt_schema=target_schema,
-            tgt_engine=tgt_engine,
-        )
+        if args.run_id:
+            _save_validation_snapshots(args.run_id, source_baseline, pipeline_stats)
+
+        if not args.skip_validate:
+            validate_staging_against_baseline(
+                source_baseline=source_baseline,
+                pipeline_stats=pipeline_stats,
+                tgt_schema=target_schema,
+                tgt_engine=tgt_engine,
+            )
 
         mark_all_checkpoints_completed(tgt_engine, pipeline_stats=pipeline_stats, batch_id=batch_id)
 

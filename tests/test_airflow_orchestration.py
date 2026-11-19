@@ -1,6 +1,7 @@
 import ast
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -54,7 +55,17 @@ class TestAirflowOrchestration(unittest.TestCase):
         self.assertEqual(group_ids, ["extract_load_bronze", "dbt_silver", "dbt_gold"])
         self.assertEqual(
             task_ids,
-            ["preflight_check", "dbt_deps", "dbt_test_silver", "dbt_snapshot", "dbt_test_gold"],
+            [
+                "check_connections",
+                "init_bronze_schema",
+                "dbt_deps",
+                "validate_bronze",
+                "dbt_test_bronze_source",
+                "dbt_test_silver",
+                "dbt_snapshot",
+                "dbt_test_gold_schema",
+                "dbt_test_business_rules",
+            ],
         )
         self.assertEqual(
             constants.get("BRONZE_TABLES"),
@@ -76,15 +87,31 @@ class TestAirflowOrchestration(unittest.TestCase):
         self.assertEqual(constants.get("GOLD_DIM_DEPENDENT_MODELS"), ["dim_customer", "dim_seller"])
         self.assertEqual(constants.get("GOLD_FACT_MODELS"), ["fact_orders", "fact_sales"])
 
-        expected_stage_chain = (
-            "preflight_check >> extract_load_bronze >> dbt_deps >> dbt_silver "
-            ">> dbt_test_silver >> dbt_snapshot >> dbt_gold >> dbt_test_gold"
-        )
         compact_source = " ".join(source.split())
-        self.assertIn(expected_stage_chain, compact_source)
-        self.assertIn("--preflight --init-schema", source)
-        self.assertIn("--table {table_name}", source)
-        self.assertIn("--target-path /tmp/dbt_{model_name}", source)
+        for dep_edge in (
+            "check_connections >> [init_bronze_schema, dbt_deps]",
+            "init_bronze_schema >> extract_load_bronze",
+            "extract_load_bronze >> validate_bronze",
+            "[extract_load_bronze, dbt_deps] >> dbt_test_bronze_source",
+            "[validate_bronze, dbt_test_bronze_source] >> dbt_silver",
+            "dbt_silver >> dbt_test_silver >> dbt_snapshot >> dbt_gold",
+            "dbt_gold >> [dbt_test_gold_schema, dbt_test_business_rules]",
+        ):
+            self.assertIn(dep_edge, compact_source)
+
+        for expected_flag in (
+            "--preflight",
+            "--init-schema",
+            "--table {table_name} --skip-validate --run-id",
+            "--validate-only --run-id",
+            "--target-path /tmp/dbt_{model_name}",
+            "--select source:* --target-path /tmp/dbt_test_bronze_source",
+            "--select staging --exclude source:* --target-path /tmp/dbt_test_silver",
+            "--select marts,test_type:generic --target-path /tmp/dbt_test_gold_schema",
+            "--select test_type:singular --target-path /tmp/dbt_test_business_rules",
+        ):
+            self.assertIn(expected_flag, source)
+
         self.assertIn('gold_tasks["dim_location"] >> [gold_tasks["dim_customer"], gold_tasks["dim_seller"]]', compact_source)
         self.assertIn('>> gold_tasks["fact_orders"]', compact_source)
         self.assertIn('>> gold_tasks["fact_sales"]', compact_source)
@@ -177,6 +204,84 @@ class TestAirflowOrchestration(unittest.TestCase):
             with self.assertRaises(SystemExit) as ctx:
                 main.main()
             self.assertEqual(ctx.exception.code, 2)
+
+    def test_main_init_schema_standalone_exits_early(self):
+        import main
+
+        with patch.object(sys, "argv", ["main.py", "--init-schema"]), \
+             patch.object(main, "test_connections") as mock_test_conn, \
+             patch.object(main, "init_bronze_schema") as mock_init_schema, \
+             patch.object(main, "init_checkpoint_manager") as mock_init_ckpt, \
+             patch.object(main, "get_watermark_states") as mock_get_wm, \
+             patch.object(main, "get_target_engine") as mock_tgt_engine:
+            main.main()
+
+        mock_test_conn.assert_not_called()
+        mock_init_schema.assert_called_once()
+        mock_init_ckpt.assert_called_once()
+        mock_get_wm.assert_called_once()
+        mock_tgt_engine.return_value.dispose.assert_called_once()
+
+    def test_main_skip_validate_and_validate_only_roundtrip(self):
+        import main
+
+        run_id = "manual__2026-11-19T16:00:00+00:00"
+        fake_baseline = {
+            "orders": {
+                "actual_table_name": "olist_orders_dataset",
+                "target_table_name": "olist_orders_dataset",
+                "strategy": "lookback_window",
+                "source_row_count": 5,
+                "expected_extract_rows": 5,
+                "expected_columns": ["order_id", "customer_id"],
+                "source_columns_meta": [{"name": "order_id", "type": object()}],
+                "date_range": {"column": "order_purchase_timestamp", "min": "2018-01-01", "max": "2018-01-02"},
+            }
+        }
+        fake_stat = {
+            "target_table": "olist_orders_dataset",
+            "strategy": "lookback_window",
+            "loaded_rows": 5,
+            "elapsed_sec": 0.1,
+            "status": "SUCCESS",
+        }
+
+        with tempfile.TemporaryDirectory() as tmp_dir, patch.object(main, "LOGS_DIR", Path(tmp_dir)):
+            with patch.object(
+                sys, "argv", ["main.py", "--table", "orders", "--skip-validate", "--run-id", run_id]
+            ), \
+                 patch.object(main, "test_connections"), \
+                 patch.object(main, "get_source_engine"), \
+                 patch.object(main, "get_target_engine"), \
+                 patch.object(main, "init_bronze_schema"), \
+                 patch.object(main, "init_checkpoint_manager"), \
+                 patch.object(main, "get_active_checkpoints", return_value={}), \
+                 patch.object(main, "get_watermark_states", return_value={}), \
+                 patch.object(main, "measure_source_baseline", return_value=fake_baseline), \
+                 patch.object(main, "_process_single_table_worker", return_value=("orders", fake_stat)), \
+                 patch.object(main, "validate_staging_against_baseline") as mock_validate_el, \
+                 patch.object(main, "mark_all_checkpoints_completed"), \
+                 patch.object(main, "save_pipeline_run_history"):
+                main.main()
+
+            mock_validate_el.assert_not_called()
+            snapshot_file = Path(tmp_dir) / "run_state" / "manual__2026-11-19T16_00_00_00_00" / "orders.json"
+            self.assertTrue(snapshot_file.exists())
+
+            with patch.object(
+                sys, "argv", ["main.py", "--validate-only", "--table", "orders", "--run-id", run_id]
+            ), \
+                 patch.object(main, "get_target_engine") as mock_tgt_engine, \
+                 patch.object(main, "validate_staging_against_baseline") as mock_validate_only:
+                main.main()
+
+            mock_validate_only.assert_called_once()
+            passed_baseline = mock_validate_only.call_args.kwargs["source_baseline"]
+            passed_stats = mock_validate_only.call_args.kwargs["pipeline_stats"]
+            self.assertEqual(passed_baseline["orders"]["source_row_count"], 5)
+            self.assertEqual(passed_baseline["orders"]["expected_columns"], ["order_id", "customer_id"])
+            self.assertEqual(passed_stats, {"orders": fake_stat})
+            mock_tgt_engine.return_value.dispose.assert_called_once()
 
 
 if __name__ == "__main__":
