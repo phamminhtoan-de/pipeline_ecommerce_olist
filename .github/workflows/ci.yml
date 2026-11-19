@@ -7,11 +7,13 @@ on:
       - main
       - master
       - 'fix/**'
-      - 'feat/**'
+      - 'feature/**'
   pull_request:
     branches:
       - main
       - master
+      - 'fix/**'
+      - 'feature/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
