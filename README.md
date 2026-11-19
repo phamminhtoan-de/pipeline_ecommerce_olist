@@ -117,7 +117,8 @@ etl_ecommerce_data/
 │       └── olist_medallion_elt.py    # DAG điều phối 7 bước: Preflight -> Bronze -> Silver -> Snapshot -> Gold
 │
 ├── logs/
-│   └── pipeline.log                  # File log duy nhất của pipeline (ghi giờ chuẩn UTC, xoay vòng 10MB)
+│   ├── pipeline.log                  # File log duy nhất của pipeline (ghi giờ chuẩn UTC, xoay vòng 10MB)
+│   └── airflow/                      # Log chi tiết các task & DAG processor của Apache Airflow
 │
 ├── Docker/
 │   └── docker-compose.yml            # Điều phối cụm Apache Airflow 3.1 (kết nối DB nguồn/đích qua host.docker.internal)

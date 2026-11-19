@@ -36,7 +36,7 @@ x-airflow-common: &airflow-common
     ETL_PYTHON_BIN: /opt/etl_venv/bin/python
   volumes:
     - ../airflow/dags:/opt/airflow/dags
-    - ../airflow/logs:/opt/airflow/logs
+    - ../logs/airflow:/opt/airflow/logs
     - ../airflow/plugins:/opt/airflow/plugins
     - ..:/opt/project
   extra_hosts:

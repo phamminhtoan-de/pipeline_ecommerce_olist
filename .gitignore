@@ -9,5 +9,4 @@ dbt_transform/logs/
 dbt_transform/dbt_packages/
 dbt_transform/.user.yml
 BAO_CAO_*.txt
-airflow/logs/
 airflow/plugins/
