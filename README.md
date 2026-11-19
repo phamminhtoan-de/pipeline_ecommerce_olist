@@ -39,14 +39,16 @@ flowchart TD
         AF_INIT --> AF_EL["3. TaskGroup: extract_load_bronze<br/>(7 parallel bronze_&lt;table&gt; --skip-validate)"]
         AF_EL --> AF_VAL["4a. validate_bronze<br/>(--validate-only --run-id)"]
         AF_EL --> AF_TB["4b. dbt_test_bronze_source<br/>(source:*)"]
+        AF_EL --> AF_FR["4c. dbt_source_freshness<br/>(24h warn / 48h error)"]
         AF_DP --> AF_TB
+        AF_DP --> AF_FR
         AF_VAL --> AF_SLV["5. TaskGroup: dbt_silver<br/>(7 parallel silver_&lt;model&gt; tasks)"]
         AF_TB --> AF_SLV
         AF_SLV --> AF_TS["6. dbt_test_silver<br/>(staging --exclude source:*)"]
         AF_TS --> AF_SNP["7. dbt_snapshot<br/>(snp_sellers SCD2)"]
         AF_SNP --> AF_GLD["8. TaskGroup: dbt_gold<br/>(Dim -> Fact Star Schema)"]
         AF_GLD --> AF_TGS["9a. dbt_test_gold_schema<br/>(marts,test_type:generic)"]
-        AF_GLD --> AF_TBR["9b. dbt_test_business_rules<br/>(test_type:singular)"]
+        AF_GLD --> AF_TBR["9b. TaskGroup: dbt_test_business_rules<br/>(6 rule_assert_* tasks)"]
     end
 
     subgraph S1["1. Upstream OLTP Layer (Windows Host)"]
@@ -312,6 +314,7 @@ docker compose down
 
 # 4. Chạy các bước biến đổi & kiểm định dbt trực tiếp:
 cd dbt_transform
+..\.venv\Scripts\dbt.exe source freshness                     # Kiểm tra độ tươi mới dữ liệu nguồn
 ..\.venv\Scripts\dbt.exe test --select source:*                 # Kiểm tra dữ liệu thô tầng Bronze
 ..\.venv\Scripts\dbt.exe run --select staging                   # Chỉ chạy tầng Silver
 ..\.venv\Scripts\dbt.exe test --select staging --exclude source:*  # Quality Gate tầng Silver
