@@ -109,19 +109,17 @@ etl_ecommerce_data/
 ├── .gitattributes                    # Chuẩn hóa ký tự xuống dòng LF
 ├── .gitignore                        # Danh sách loại trừ khỏi git (venv, logs, credentials)
 ├── requirements.txt                  # Danh mục thư viện Python
+├── docker-compose.yml                # Điều phối cụm Apache Airflow 3.1 (kết nối DB nguồn/đích qua host.docker.internal)
 ├── main.py                           # Entrypoint kiểm tra kết nối (--preflight) & nạp tầng Bronze (EL)
 │
-├── airflow/                          # Bộ điều phối Apache Airflow 3.0 (LocalExecutor)
-│   ├── Dockerfile                    # Image Airflow 3.0 + ODBC Driver 18 + /opt/etl_venv độc lập
+├── airflow/                          # Bộ điều phối Apache Airflow 3.1 (LocalExecutor)
+│   ├── Dockerfile                    # Image Airflow 3.1 + ODBC Driver 18 + /opt/etl_venv độc lập
 │   └── dags/
 │       └── olist_medallion_elt.py    # DAG điều phối 7 bước: Preflight -> Bronze -> Silver -> Snapshot -> Gold
 │
 ├── logs/
 │   ├── pipeline.log                  # File log duy nhất của pipeline (ghi giờ chuẩn UTC, xoay vòng 10MB)
 │   └── airflow/                      # Log chi tiết các task & DAG processor của Apache Airflow
-│
-├── Docker/
-│   └── docker-compose.yml            # Điều phối cụm Apache Airflow 3.1 (kết nối DB nguồn/đích qua host.docker.internal)
 │
 ├── docs/
 │   ├── README.md                     # Tài liệu kỹ thuật chi tiết của dự án
@@ -271,11 +269,11 @@ etl_ecommerce_data/
 
 Khởi chạy cụm **Apache Airflow 3.1** (tự động kết nối tới SQL Server và PostgreSQL DWH đang chạy trên máy host qua `host.docker.internal`, cần cấp Docker Desktop tối thiểu ~4 GB RAM):
 ```powershell
-docker compose --env-file .env -f Docker/docker-compose.yml up -d --build
+docker compose up -d --build
 ```
 Sau khi khởi động xong, truy cập **http://localhost:8080** (tài khoản mặc định `admin` / `admin`), chọn DAG **`olist_medallion_elt`** và nhấn **Trigger DAG** (có thể bật `full_refresh: true` qua **Trigger DAG w/ config** để chạy `--full-refresh`, hoặc chờ lịch tự động lúc **02:00 sáng** hằng ngày giờ Việt Nam). Để dừng cụm, chạy:
 ```powershell
-docker compose --env-file .env -f Docker/docker-compose.yml down
+docker compose down
 ```
 
 #### Lựa chọn 2: Chạy thủ công / Debug cục bộ trên Python (Windows PowerShell)

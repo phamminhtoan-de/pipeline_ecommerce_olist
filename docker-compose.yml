@@ -1,10 +1,10 @@
 x-airflow-common: &airflow-common
   build:
-    context: ..
+    context: .
     dockerfile: airflow/Dockerfile
   image: olist_airflow:3.1.0-python3.12
   env_file:
-    - ../.env
+    - ./.env
   user: "${AIRFLOW_UID:-50000}:0"
   environment:
     &airflow-common-env
@@ -35,10 +35,10 @@ x-airflow-common: &airflow-common
     ETL_PROJECT_DIR: /opt/project
     ETL_PYTHON_BIN: /opt/etl_venv/bin/python
   volumes:
-    - ../airflow/dags:/opt/airflow/dags
-    - ../logs/airflow:/opt/airflow/logs
-    - ../airflow/plugins:/opt/airflow/plugins
-    - ..:/opt/project
+    - ./airflow/dags:/opt/airflow/dags
+    - ./logs/airflow:/opt/airflow/logs
+    - ./airflow/plugins:/opt/airflow/plugins
+    - .:/opt/project
   extra_hosts:
     - "host.docker.internal:host-gateway"
   networks:
