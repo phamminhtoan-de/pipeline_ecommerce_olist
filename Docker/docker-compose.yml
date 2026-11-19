@@ -9,17 +9,19 @@ x-airflow-common: &airflow-common
   environment:
     &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
-    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER:-airflow}:${AIRFLOW_DB_PASSWORD:-airflow}@airflow_metadb:5432/${AIRFLOW_DB_NAME:-airflow}
-    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-7m5R9kP2vX8qL4wN1zT6yB3cF0hJ9sD2gK5mN8pQ1rU=}
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER:-airflow}:${AIRFLOW_DB_PASSWORD:?Thieu AIRFLOW_DB_PASSWORD trong file .env}@airflow_metadb:5432/${AIRFLOW_DB_NAME:-airflow}
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:?Thieu AIRFLOW_FERNET_KEY trong file .env}
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'false'
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
     AIRFLOW__CORE__DEFAULT_TIMEZONE: Asia/Ho_Chi_Minh
     AIRFLOW__UI__DEFAULT_UI_TIMEZONE: Asia/Ho_Chi_Minh
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
-    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:-olist-airflow-jwt-secret-key-2026}
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:?Thieu AIRFLOW_JWT_SECRET trong file .env}
     AIRFLOW__CORE__AUTH_MANAGER: airflow.api_fastapi.auth.managers.simple.simple_auth_manager.SimpleAuthManager
     AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: ${AIRFLOW_ADMIN_USER:-admin}:admin
     AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE: /opt/airflow/simple_auth_passwords.json
+    AIRFLOW_ADMIN_USER: ${AIRFLOW_ADMIN_USER:-admin}
+    AIRFLOW_ADMIN_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:?Thieu AIRFLOW_ADMIN_PASSWORD trong file .env}
     # Tắt alert ở script Python khi chạy dưới Airflow để tránh gửi trùng khi retry (chỉ giữ callback cấp DAG)
     ALERT_ON_SCRIPT_ERROR: "false"
     SRC_DB_TIMEZONE: ${SRC_DB_TIMEZONE:-UTC}
@@ -90,7 +92,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${AIRFLOW_DB_USER:-airflow}
-      POSTGRES_PASSWORD: ${AIRFLOW_DB_PASSWORD:-airflow}
+      POSTGRES_PASSWORD: ${AIRFLOW_DB_PASSWORD:?Thieu AIRFLOW_DB_PASSWORD trong file .env}
       POSTGRES_DB: ${AIRFLOW_DB_NAME:-airflow}
     volumes:
       - airflow_metadb_data:/var/lib/postgresql/data
