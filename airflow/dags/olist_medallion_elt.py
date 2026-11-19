@@ -99,6 +99,7 @@ with DAG(
     start_date=pendulum.datetime(2025, 1, 1, tz="Asia/Ho_Chi_Minh"),
     catchup=False,
     max_active_runs=1,
+    max_active_tasks=3,
     tags=["olist", "medallion", "elt", "dbt", "bronze-silver-gold"],
     params={
         "full_refresh": Param(

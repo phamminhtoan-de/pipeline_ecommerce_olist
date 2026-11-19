@@ -49,6 +49,7 @@ class TestAirflowOrchestration(unittest.TestCase):
         self.assertEqual(dag_kwargs.get("schedule"), "0 2 * * *")
         self.assertIs(dag_kwargs.get("catchup"), False)
         self.assertEqual(dag_kwargs.get("max_active_runs"), 1)
+        self.assertEqual(dag_kwargs.get("max_active_tasks"), 3)
 
         self.assertEqual(group_ids, ["extract_load_bronze", "dbt_silver", "dbt_gold"])
         self.assertEqual(
