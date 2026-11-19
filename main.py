@@ -195,7 +195,7 @@ def _process_single_table_worker(
         batch_time=batch_time,
     )
     if not query_str:
-        logger.warning(f"⏩ Bỏ qua bảng '{logical_name}' do bị hủy theo cơ chế/cancel.")
+        logger.warning(f"Bỏ qua bảng '{logical_name}' do bị hủy theo cơ chế/cancel.")
         return logical_name, None
 
     chunk_stream = extract_table(
@@ -223,19 +223,19 @@ def main():
     args, target_tables = _parse_cli_args(sys.argv[1:])
 
     if args.preflight:
-        logger.info("🔍 Đang kiểm tra kết nối Source (SQL Server) và Target (PostgreSQL)...")
+        logger.info("Đang kiểm tra kết nối Source (SQL Server) và Target (PostgreSQL)...")
         try:
             test_connections()
             if args.init_schema:
-                logger.info("🛠️ Đang khởi tạo trước schema Bronze và metadata (--init-schema)...")
+                logger.info("Đang khởi tạo trước schema Bronze và metadata (--init-schema)...")
                 tgt_engine = get_target_engine()
                 init_bronze_schema(tgt_engine, target_schema=TGT_DB_SCHEMA)
                 init_checkpoint_manager(tgt_engine)
                 get_watermark_states(tgt_engine, tgt_schema=TGT_DB_SCHEMA)
-            logger.info("✅ Kết nối Source và Target Database đều sẵn sàng!")
+            logger.info("Kết nối Source và Target Database đều sẵn sàng!")
             return
         except Exception as exc:
-            err_msg = f"💥 Lỗi kết nối Database khi preflight check: {exc}"
+            err_msg = f"Lỗi kết nối Database khi preflight check: {exc}"
             logger.error(err_msg)
             send_alert_webhook(err_msg)
             sys.exit(1)
@@ -250,13 +250,13 @@ def main():
                 pass
 
     elif args.preflight_source:
-        logger.info("🔍 Đang kiểm tra kết nối Source Database (SQL Server)...")
+        logger.info("Đang kiểm tra kết nối Source Database (SQL Server)...")
         try:
             test_source_connection()
-            logger.info("✅ Kết nối Source Database (SQL Server) sẵn sàng!")
+            logger.info("Kết nối Source Database (SQL Server) sẵn sàng!")
             return
         except Exception as exc:
-            err_msg = f"💥 Lỗi kết nối Source Database (SQL Server): {exc}"
+            err_msg = f"Lỗi kết nối Source Database (SQL Server): {exc}"
             logger.error(err_msg)
             send_alert_webhook(err_msg)
             sys.exit(1)
@@ -267,13 +267,13 @@ def main():
                 pass
 
     elif args.preflight_target:
-        logger.info("🔍 Đang kiểm tra kết nối Target Database (PostgreSQL)...")
+        logger.info("Đang kiểm tra kết nối Target Database (PostgreSQL)...")
         try:
             test_target_connection()
-            logger.info("✅ Kết nối Target Database (PostgreSQL) sẵn sàng!")
+            logger.info("Kết nối Target Database (PostgreSQL) sẵn sàng!")
             return
         except Exception as exc:
-            err_msg = f"💥 Lỗi kết nối Target Database (PostgreSQL): {exc}"
+            err_msg = f"Lỗi kết nối Target Database (PostgreSQL): {exc}"
             logger.error(err_msg)
             send_alert_webhook(err_msg)
             sys.exit(1)
@@ -284,17 +284,17 @@ def main():
                 pass
 
     elif args.init_schema:
-        logger.info("🛠️ Đang khởi tạo độc lập schema Bronze và metadata (--init-schema)...")
+        logger.info("Đang khởi tạo độc lập schema Bronze và metadata (--init-schema)...")
         tgt_engine = None
         try:
             tgt_engine = get_target_engine()
             init_bronze_schema(tgt_engine, target_schema=TGT_DB_SCHEMA)
             init_checkpoint_manager(tgt_engine)
             get_watermark_states(tgt_engine, tgt_schema=TGT_DB_SCHEMA)
-            logger.info("✅ Khởi tạo schema Bronze và metadata hoàn tất!")
+            logger.info("Khởi tạo schema Bronze và metadata hoàn tất!")
             return
         except Exception as exc:
-            err_msg = f"💥 Lỗi khởi tạo schema Bronze (--init-schema): {exc}"
+            err_msg = f"Lỗi khởi tạo schema Bronze (--init-schema): {exc}"
             logger.error(err_msg)
             send_alert_webhook(err_msg)
             sys.exit(1)
@@ -310,7 +310,7 @@ def main():
             [t for t in target_tables if t in REQUIRED_TABLES] if target_tables is not None else REQUIRED_TABLES
         )
         scope_label = "toàn bộ 7 bảng" if target_tables is None else target_tables
-        logger.info(f"🔍 Đang chạy đối chiếu tầng Bronze với baseline ({scope_label})...")
+        logger.info(f"Đang chạy đối chiếu tầng Bronze với baseline ({scope_label})...")
         tgt_engine = None
         try:
             tgt_engine = get_target_engine()
@@ -337,10 +337,10 @@ def main():
                 tgt_schema=TGT_DB_SCHEMA,
                 tgt_engine=tgt_engine,
             )
-            logger.info("✅ Đối chiếu tầng Bronze hoàn tất!")
+            logger.info("Đối chiếu tầng Bronze hoàn tất!")
             return
         except Exception as exc:
-            err_msg = f"💥 Lỗi đối chiếu tầng Bronze (--validate-only): {exc}"
+            err_msg = f"Lỗi đối chiếu tầng Bronze (--validate-only): {exc}"
             logger.error(err_msg)
             send_alert_webhook(err_msg)
             sys.exit(1)
@@ -369,7 +369,7 @@ def main():
     )
     scope_desc = f"bảng {target_tables}" if target_tables is not None else "toàn bộ 7 bảng"
 
-    logger.info(f"🚀 BẮT ĐẦU CHẠY PIPELINE ({scope_desc} | BATCH ID: {batch_id})")
+    logger.info(f"BẮT ĐẦU CHẠY PIPELINE ({scope_desc} | BATCH ID: {batch_id})")
 
     try:
         test_connections()
@@ -384,7 +384,7 @@ def main():
         }
         if in_progress_tables:
             logger.warning(
-                f"🔄 Phát hiện bảng chưa hoàn tất ở lần chạy trước: {sorted(in_progress_tables)} "
+                f"Phát hiện bảng chưa hoàn tất ở lần chạy trước: {sorted(in_progress_tables)} "
                 f"-> Kích hoạt chế độ resume (>= watermark)..."
             )
 
@@ -425,7 +425,7 @@ def main():
                 if stat is not None:
                     pipeline_stats[logical_name] = stat
         else:
-            logger.info(f"⚡ Kích hoạt trích xuất & nạp song song ({ETL_MAX_WORKERS} workers)...")
+            logger.info(f"Kích hoạt trích xuất & nạp song song ({ETL_MAX_WORKERS} workers)...")
             with ThreadPoolExecutor(max_workers=min(ETL_MAX_WORKERS, len(source_baseline))) as executor:
                 futures = [
                     executor.submit(
@@ -479,14 +479,14 @@ def main():
         total_rows = sum(s["loaded_rows"] for s in pipeline_stats.values())
         total_elapsed = time.time() - pipeline_start
         logger.info(
-            f"📊 TỔNG CỘNG BRONZE: {len(pipeline_stats)} bảng | {total_rows:,} dòng | Thời gian nạp: {total_elapsed:.2f}s"
+            f"TỔNG CỘNG BRONZE: {len(pipeline_stats)} bảng | {total_rows:,} dòng | Thời gian nạp: {total_elapsed:.2f}s"
         )
-        logger.info("🎉 NẠP TẦNG BRONZE THÀNH CÔNG 100%!")
+        logger.info("NẠP TẦNG BRONZE THÀNH CÔNG 100%!")
 
     except SchemaValidationError as sve:
         total_elapsed = time.time() - pipeline_start
         err_msg = (
-            f"🛑 Lỗi Schema Contract: pipeline dừng có kiểm soát do thay đổi cấu trúc nguồn không hợp lệ "
+            f"Lỗi Schema Contract: pipeline dừng có kiểm soát do thay đổi cấu trúc nguồn không hợp lệ "
             f"(sau {total_elapsed:.2f}s):\n{sve}"
         )
         logger.error(err_msg)
@@ -494,12 +494,12 @@ def main():
         sys.exit(1)
     except Exception as exc:
         total_elapsed = time.time() - pipeline_start
-        err_msg = f"💥 PIPELINE THẤT BẠI SAU {total_elapsed:.2f}s (Batch {batch_id}): {exc}"
+        err_msg = f"PIPELINE THẤT BẠI SAU {total_elapsed:.2f}s (Batch {batch_id}): {exc}"
         logger.error(err_msg)
         send_alert_webhook(err_msg)
 
         logger.warning(
-            f"💾 Dữ liệu các chunk đã commit được bảo toàn trong '{target_schema}'. "
+            f"Dữ liệu các chunk đã commit được bảo toàn trong '{target_schema}'. "
             f"Checkpoint được lưu trong metadata, hệ thống sẽ tự động khôi phục ở lần chạy sau!"
         )
         sys.exit(1)

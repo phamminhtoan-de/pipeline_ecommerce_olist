@@ -181,4 +181,4 @@ def mark_all_checkpoints_completed(tgt_engine, pipeline_stats, batch_id):
                     ),
                     {"batch_id": batch_id, "logical_name": logical_name},
                 )
-    logger.info(f"✅ Đã đánh dấu checkpoint COMPLETED cho batch '{batch_id}'.")
+    logger.info(f"Đã đánh dấu checkpoint COMPLETED cho batch '{batch_id}'.")

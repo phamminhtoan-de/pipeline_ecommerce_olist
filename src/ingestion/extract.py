@@ -301,7 +301,7 @@ def extract_from_sqlserver(
             batch_time=batch_time,
         )
         if not query_str:
-            logger.warning(f"⏩ Bỏ qua bảng '{logical_name}' do bị hủy theo cơ chế/cancel. Tiếp tục các bảng khác...")
+            logger.warning(f"Bỏ qua bảng '{logical_name}' do bị hủy theo cơ chế/cancel. Tiếp tục các bảng khác...")
             continue
 
         table_stream = extract_table(

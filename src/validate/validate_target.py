@@ -162,11 +162,11 @@ def validate_staging_against_baseline(
 
     if errors:
         summary_err = (
-            f"\n❌ Dừng pipeline: phát hiện {len(errors)} sai lệch giữa Source và Bronze:\n"
+            f"\nDừng pipeline: phát hiện {len(errors)} sai lệch giữa Source và Bronze:\n"
             + "\n".join(f"  - {e}" for e in errors)
         )
         logger.error(summary_err)
         raise ValueError(summary_err)
 
-    logger.info("=== ✅ Đối chiếu thành công: dữ liệu đã nạp an toàn vào Bronze và khớp 100% với Baseline! ===")
+    logger.info("=== Đối chiếu thành công: dữ liệu đã nạp an toàn vào Bronze và khớp 100% với Baseline! ===")
     return True

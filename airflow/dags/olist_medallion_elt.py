@@ -72,7 +72,7 @@ def on_task_failure_alert(context):
     try_number = getattr(ti, "try_number", "?")
 
     message = (
-        f"🚨 Airflow DAG thất bại tại task `{task_id}` sau tất cả các lần retry\n"
+        f"Airflow DAG thất bại tại task `{task_id}` sau tất cả các lần retry\n"
         f"- DAG: `{dag_id}`\n"
         f"- Run ID: `{run_id}`\n"
         f"- Logical Date: `{logical_date}`\n"

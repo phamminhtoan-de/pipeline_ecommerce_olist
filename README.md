@@ -8,39 +8,43 @@
 [![SQL Server](https://img.shields.io/badge/SQL_Server-2022-CC292B.svg?style=flat&logo=microsoftsqlserver&logoColor=white)](https://www.microsoft.com/sql-server)
 [![CI Pipeline](https://img.shields.io/badge/CI_Pipeline-Passing-brightgreen.svg?style=flat&logo=githubactions&logoColor=white)](.github/workflows/ci.yml)
 
-Hệ thống Data Engineering chuẩn doanh nghiệp theo mô hình **Medallion Architecture (Bronze -> Silver -> Gold)**, trích xuất dữ liệu giao dịch thương mại điện tử từ Microsoft SQL Server (OLTP), nạp trực tiếp vào PostgreSQL Data Warehouse theo cơ chế **Bronze Append-Only**, khử trùng lặp và làm sạch tại tầng **Silver**, sau đó mô hình hóa thành **Kimball Star Schema** tại tầng **Gold** bằng dbt Core.
+---
+
+## 1. Introduction
+
+- **Project overview**:
+  Hệ thống Data Engineering xây dựng theo kiến trúc **Medallion Architecture (`Bronze` -> `Silver` -> `Gold`)**, trích xuất dữ liệu thương mại điện tử Olist từ **Microsoft SQL Server (OLTP)**, nạp trực tiếp vào **PostgreSQL Data Warehouse** theo cơ chế **Bronze Append-Only**, làm sạch/khử trùng lặp tại tầng **Silver**, và mô hình hóa **Kimball Star Schema** tại tầng **Gold** bằng **dbt Core** dưới sự điều phối tự động của **Apache Airflow 3.1**.
+- **Project objectives**:
+  - Tách biệt hoàn toàn pha **Extract & Load (`E-L`)** bằng Python khỏi pha **Transform (`T`)** bằng dbt SQL.
+  - Đảm bảo tính **Idempotency** (chạy lại không sai lệch dữ liệu), hỗ trợ **Crash Recovery** theo từng chunk bằng ACID transaction + checkpoint, và kiểm soát **Schema Contract / Schema Evolution** tự động.
+  - Tự động hóa quy trình theo dõi chất lượng dữ liệu đa tầng (`Source` -> `Silver` -> `Gold Schema` -> `Business Rules`) và kiểm thử CI trên **GitHub Actions** kèm dịch vụ `postgres:16`.
+- **Business problem**:
+  Dữ liệu giao dịch OLTP trên SQL Server phát sinh biến động trạng thái đơn hàng theo thời gian (`created` -> `shipped` -> `delivered`), có thể phát sinh bản ghi trùng lặp, thiếu khóa ngoại hoặc thay đổi cấu trúc cột từ hệ thống nguồn. Nếu ghi đè trực tiếp hoặc làm sạch bằng script rời rạc sẽ dễ mất dấu lịch sử kiểm toán, nghẽn khi chạy lại toàn bộ bảng lớn và khó truy vết nguyên nhân khi báo cáo doanh thu BI sai lệch.
 
 ---
 
-## 1. Tổng quan Kiến trúc Pipeline (Architecture Overview)
+## 2. Architecture
 
-Dự án áp dụng kiến trúc **Medallion (Lakehouse-style)** nhằm giải quyết dứt điểm các hạn chế của quy trình ETL truyền thống:
+### System architecture
+Hệ thống phân tách thành 4 lớp vận hành chính:
+1. **Upstream OLTP (Windows Host)**: SQL Server (`READ COMMITTED`, cấu hình múi giờ nguồn `SRC_DB_TIMEZONE`).
+2. **Orchestration Layer (Docker Compose - Apache Airflow 3.1 `LocalExecutor`)**: Gồm 4 container chạy nền (`airflow_metadb`, `airflow-apiserver`, `airflow-scheduler`, `airflow-dag-processor`) và 1 container khởi tạo (`airflow-init`), kết nối về DB trên máy host qua `host.docker.internal`.
+3. **Ingestion Engine (`/opt/etl_venv` / `.venv`)**: Kiểm tra kết nối tách biệt Source/Target, đối chiếu Schema Contract, stream từng chunk qua `psycopg2` `COPY`, ghi checkpoint nguyên tử và đồng bộ cột mới (`ALTER TABLE ADD COLUMN`).
+4. **PostgreSQL Data Warehouse & dbt Core**: Chứa các schema `bronze` (dữ liệu thô + `_etl_watermarks`, `_etl_run_history`), `etl_metadata` (`_pipeline_checkpoints`, `_pipeline_chunk_checkpoints`), `silver` (bảng làm sạch + `snp_sellers`), `gold` (Star Schema), và `test_failures` (lưu bản ghi vi phạm dbt test).
 
-### Các tính năng cốt lõi (Key Features):
-* **Bronze Append-Only Incremental & Snapshot Ingestion**: Các bảng sự kiện có mốc thời gian (`orders`, `order_reviews`) được nạp tăng tiến **Append-Only** vào PostgreSQL `bronze` theo chiến lược `watermark` và `lookback_window` (kèm cơ chế checkpoint theo chunk) mà không lọc bỏ hay ghi đè lịch sử; các bảng danh mục/chi tiết không có mốc thời gian nguồn (`customers`, `products`, `sellers`, `order_items`, `order_payments`) sử dụng cơ chế nạp lại toàn phần (**full snapshot reload**). Không mắc "Nghịch lý Incremental", chỉ nạp đúng phần delta phát sinh ($O(\Delta N)$) cho các bảng giao dịch.
-* **In-Transaction Atomic Checkpoint & Watermark**: Mỗi chunk nạp vào và mốc checkpoint trong `etl_metadata._pipeline_checkpoints` được thực thi trong **cùng 1 Transaction ACID**. Khi có sự cố, chunk lỗi tự động rollback, các chunk đã commit trước đó được bảo toàn, cho phép resume chính xác ở lần chạy sau.
-* **Data Versioning & Audit Trail**: Lưu trữ toàn bộ lịch sử biến động trạng thái đơn hàng (ví dụ: `created` -> `shipped` -> `delivered`) với siêu dữ liệu `_batch_id` và `_extracted_at`, phục vụ truy vết kiểm toán và phân tích chuỗi sự kiện.
-* **Khử trùng lặp tại tầng Silver dbt (SQL-based Deduplication)**: Chuyển toàn bộ tải tính toán làm sạch, ép kiểu và khử trùng lặp về tầng Silver qua `ROW_NUMBER() OVER (PARTITION BY pk ORDER BY _extracted_at DESC)`. Đảm bảo tính **Idempotency tuyệt đối**.
-* **Unified Gold Star Schema (Kimball)**: Hợp nhất toàn bộ 5 bảng Dimension (bao gồm SCD Type 2 theo dõi khách hàng chuyển địa điểm) và 2 bảng Fact vào một schema duy nhất (`gold`).
-* **Trích xuất đồng thời (Concurrent Extraction)**: Hỗ trợ `ThreadPoolExecutor` nạp song song nhiều bảng, kết hợp cơ chế thử lại có giãn cách tăng dần (exponential backoff retry) do Apache Airflow điều phối.
-* **Separated Observability & UTC Logging**: Phân tách rõ log theo từng tầng trong `logs/` — `logs/pipeline.log` cho Extract & Load chuẩn giờ UTC (`%Y-%m-%d %H:%M:%S UTC`), `logs/dbt.log` cho quá trình biến đổi/test dbt, và `logs/airflow/` cho lịch chạy & task của Apache Airflow.
-* **Khung kiểm thử chất lượng 4 tầng (4-Tier Quality Framework)**: Phủ kín từ kiểm tra độ tươi mới (freshness) tầng nguồn, hợp lệ tầng Silver, toàn vẹn khóa tầng Marts đến đối chiếu doanh thu, số lượng đơn hàng tầng Gold.
-
----
-
-## 2. Mô tả Luồng Xử lý Dữ liệu Hiện tại (Current Data Flow)
+### Data flow
 
 ```mermaid
 flowchart TD
     subgraph S0["0. Orchestration Layer (Apache Airflow 3.1 - LocalExecutor & TaskGroups)"]
         direction LR
-        AF_CHK["1. check_connections<br/>(--preflight)"] --> AF_INIT["2a. init_bronze_schema<br/>(--init-schema)"]
-        AF_CHK --> AF_DP["2b. dbt_deps"]
-        AF_INIT --> AF_EL["3. TaskGroup: extract_load_bronze<br/>(7 parallel bronze_&lt;table&gt; --skip-validate)"]
+        AF_SRC["1a. check_source_sqlserver<br/>(--preflight-source)"] --> AF_EL["3. TaskGroup: extract_load_bronze<br/>(7 parallel bronze_&lt;table&gt; --skip-validate)"]
+        AF_TGT["1b. check_target_postgres<br/>(--preflight-target)"] --> AF_INIT["2a. init_bronze_schema<br/>(--init-schema)"]
+        AF_INIT --> AF_EL
         AF_EL --> AF_VAL["4a. validate_bronze<br/>(--validate-only --run-id)"]
         AF_EL --> AF_TB["4b. dbt_test_bronze_source<br/>(source:*)"]
         AF_EL --> AF_FR["4c. dbt_source_freshness<br/>(24h warn / 48h error)"]
-        AF_DP --> AF_TB
+        AF_DP["2b. dbt_deps"] --> AF_TB
         AF_DP --> AF_FR
         AF_VAL --> AF_SLV["5. TaskGroup: dbt_silver<br/>(7 parallel silver_&lt;model&gt; tasks)"]
         AF_TB --> AF_SLV
@@ -52,315 +56,288 @@ flowchart TD
     end
 
     subgraph S1["1. Upstream OLTP Layer (Windows Host)"]
-        SS["SQL Server 2022 (E_commerce)<br/>READ COMMITTED • SRC_DB_TIMEZONE"]
+        SS["SQL Server 2022<br/>READ COMMITTED • SRC_DB_TIMEZONE"]
     end
 
-    subgraph S2["2. Ingestion & Quality Guard (/opt/etl_venv)"]
+    subgraph S2["2. Ingestion & Quality Guard (Python)"]
         direction TB
-        BC["Pre-flight Baseline & Schema Contract<br/>(contract.py)"]
-        INIT["Bootstrap DDL & Checkpoint Init<br/>(init_schema.py, state_manager.py)"]
-        EX["Concurrent Chunked Streamer<br/>(extract.py + ThreadPoolExecutor)"]
-        EVO["Target Dynamic Schema Evolution<br/>(evolution.py)"]
-        SS --> BC
-        BC --> INIT
-        INIT --> EX
-        EX --> EVO
+        BC["Baseline & Schema Contract<br/>(contract.py, validate_source.py)"]
+        INIT["Bootstrap DDL & Checkpoint<br/>(init_schema.py, state_manager.py)"]
+        EX["Chunked Streamer & Loader<br/>(extract.py, load.py)"]
+        EVO["Schema Evolution<br/>(evolution.py)"]
+        SS --> BC --> INIT --> EX --> EVO
     end
 
-    subgraph S3["3. PostgreSQL Bronze Layer (schema: bronze, etl_metadata)"]
+    subgraph S3["3. PostgreSQL DWH (bronze, etl_metadata, silver, gold)"]
         direction TB
-        BRZ["Bronze Store<br/>orders (lookback 60d), reviews (lookback 3d)<br/>&amp; 5 bảng full reload"]
-        CKP["In-Transaction ACID Checkpointing<br/>(etl_metadata._pipeline_checkpoints)"]
-        AUD["2-Tier Row Count Baseline Audit<br/>(validate_target.py)"]
-        EVO --> BRZ
-        BRZ <--> CKP
-        BRZ --> AUD
-    end
-
-    subgraph S4["4. dbt Silver Layer (schema: silver)"]
-        STG["Cleaned &amp; Deduped Models<br/>(ROW_NUMBER + incremental merge)"]
-        AUD -->|"dbt run --select staging"| STG
-    end
-
-    subgraph S5["5. dbt Gold Layer (schema: gold)"]
-        GOLD["Kimball Unified Star Schema Marts<br/>5 Dims (dim_customer/dim_seller SCD2) + 2 Facts"]
-        TST["Multi-Tier Automated Test Guard<br/>(dbt test -> test_failures schema)"]
-        STG -->|"dbt run --select marts"| GOLD
-        STG -.->|"dbt test"| TST
-        GOLD -.->|"dbt test"| TST
-    end
-
-    subgraph S6["6. Business Intelligence &amp; Reporting"]
-        BI["Dashboards &amp; Self-Service BI<br/>PowerBI / Metabase / Tableau"]
-        GOLD --> BI
+        BRZ["Bronze Append-Only<br/>orders (lookback 60d), reviews (lookback 3d) &amp; 5 bảng full"]
+        SLV["Silver Cleaned Models &amp; Snapshot<br/>(ROW_NUMBER + incremental merge + snp_sellers)"]
+        GLD["Gold Star Schema<br/>5 Dims (dim_customer/dim_seller SCD2) + 2 Facts"]
+        EVO --> BRZ --> SLV --> GLD
     end
 
     S0 -.->|"Điều phối qua host.docker.internal"| S2
 ```
 
-### Các bước vận hành chi tiết:
-1. **Kiểm tra kết nối & Tiền điều kiện (Pre-flight Checks)**: Xác thực cổng mạng, kiểm tra quyền truy cập SQL Server (ODBC Driver 18) và PostgreSQL 16.
-2. **Khởi tạo & Đồng bộ Cấu trúc (Schema Initialization & Evolution)**:
-   * Chạy [init_bronze_schema](file:///d:/code/personal_project/etl_ecommerce_data/src/schema/init_schema.py) tạo bảng `CREATE TABLE IF NOT EXISTS` trong schema `bronze`.
-   * Tự động phát hiện và thêm cột mới (`ALTER TABLE ADD COLUMN`) vào Bronze nếu schema nguồn có cập nhật.
-3. **Đọc Checkpoint & Xác định dải Watermark**:
-   * Kiểm tra bảng `etl_metadata._pipeline_checkpoints` và `bronze._etl_watermarks` để xác định mốc dữ liệu đã commit gần nhất.
-4. **Đo lường Baseline Nguồn (Source Baseline Probe)**:
-   * Kiểm đếm số dòng thực tế từ SQL Server dưới mức cô lập `READ COMMITTED`.
-5. **Trích xuất & Nạp dòng song song (Concurrent Extract & Load)**:
-   * Phân luồng `ThreadPoolExecutor` xử lý đồng thời nhiều bảng.
-   * Nạp trực tiếp từng chunk vào bảng `bronze` qua PostgreSQL COPY Protocol siêu tốc.
-   * Commit dữ liệu chunk và mốc checkpoint trong **cùng 1 Transaction ACID**.
-6. **Kiểm toán số dòng 2 tầng (2-Tier Baseline Audit)**:
-   * Đối chiếu số dòng đã nạp với baseline để phát hiện thất thoát dữ liệu ngay tại đích đến.
-7. **Biến đổi & Khử trùng lặp tại tầng Silver dbt**:
-   * Lọc bản ghi hợp lệ, ép kiểu, chuẩn hóa chuỗi và chọn bản ghi mới nhất qua `ROW_NUMBER() OVER (PARTITION BY pk ORDER BY _extracted_at DESC)`.
-8. **Mô hình hóa Star Schema tại tầng Gold & Chạy bộ Test 4 tầng**:
-   * Xây dựng Dimension (SCD Type 2 cho khách hàng) và Fact tables.
-   * Chạy bộ test tự động đối chiếu doanh thu, số lượng đơn và lưu các dòng vi phạm vào schema `test_failures`.
+---
+
+## 3. Technology Stack
+
+- **Python (`3.12`)**: `SQLAlchemy`, `pyodbc`, `psycopg2`, `pandas`, `PyYAML`, `python-dotenv`, `unittest` cho bộ máy trích xuất/nạp song song, kiểm soát Schema Contract và kiểm thử tự động.
+- **PostgreSQL (`16`)**: Data Warehouse đích cho các tầng `bronze`, `silver`, `gold`, schema metadata `etl_metadata`, schema lỗi `test_failures`, và metadata DB của Airflow (`airflow_metadb`).
+- **dbt (`dbt-postgres==1.11.0`, `dbt_utils`)**: Thực thi SQL transformation dạng incremental merge tại Silver, `dbt snapshot` (SCD Type 2), Star Schema tại Gold, kiểm tra độ tươi mới nguồn và 4 tầng data test.
+- **Airflow (`Apache Airflow 3.1.0`, `LocalExecutor`)**: Điều phối toàn bộ DAG [olist_medallion_elt.py](file:///d:/code/personal_project/etl_ecommerce_data/airflow/dags/olist_medallion_elt.py) theo `TaskGroup`, hỗ trợ retry exponential backoff, giới hạn concurrency (`max_active_tasks=3`) và webhook alert khi task thất bại.
+- **Docker (`Docker Compose` + custom [airflow/Dockerfile](file:///d:/code/personal_project/etl_ecommerce_data/airflow/Dockerfile))**: Đóng gói sẵn Airflow 3.1, Microsoft ODBC Driver 18 for SQL Server và virtualenv `/opt/etl_venv` độc lập cho ETL & dbt.
 
 ---
 
-## 3. Cấu trúc Thư mục Dự án (Project Directory Structure)
+## 4. Project Structure
 
 ```text
 etl_ecommerce_data/
-├── .env                              # Thông tin cấu hình môi trường & kết nối CSDL
-├── .env.example                      # Template mẫu cho cấu hình môi trường
-├── .gitignore                        # Danh sách loại trừ khỏi git (venv, logs, credentials)
-├── requirements.txt                  # Danh mục thư viện Python
-├── docker-compose.yml                # Điều phối cụm Apache Airflow 3.1 (kết nối DB nguồn/đích qua host.docker.internal)
-├── main.py                           # Entrypoint kiểm tra kết nối (--preflight), tạo schema (--init-schema), nạp (--table, --skip-validate) & đối soát (--validate-only)
+├── .github/workflows/ci.yml          # GitHub Actions CI: Unit + Live Postgres 16 Tests, dbt Build/Test, Docker Build
+├── .env.example                      # Template mẫu biến môi trường cho SQL Server, Postgres, Alert & Airflow
+├── .gitignore                        # Loại trừ .venv, logs, target, dbt_packages, .env
+├── requirements.txt                  # Danh sách thư viện Python cho ETL & test
+├── docker-compose.yml                # Khởi chạy 5 service Airflow 3.1 (metadb, init, apiserver, scheduler, dag-processor)
+├── main.py                           # Entrypoint CLI (--preflight-source/-target, --init-schema, --table, --skip-validate, --validate-only)
 │
-├── airflow/                          # Bộ điều phối Apache Airflow 3.1 (LocalExecutor)
-│   ├── Dockerfile                    # Image Airflow 3.1 + ODBC Driver 18 + /opt/etl_venv độc lập
-│   └── dags/
-│       └── olist_medallion_elt.py    # DAG TaskGroup tách từng tầng: Check -> Init/Deps -> 7 Bronze -> Validate/Source Test -> Silver -> Gold -> Schema/Business Rules Tests
-│
-├── logs/
-│   ├── pipeline.log                  # Log tiến trình Extract & Load Python (chuẩn UTC, xoay vòng 10MB)
-│   ├── dbt.log                       # Log biên dịch SQL & kiểm định chất lượng của dbt
-│   └── airflow/                      # Log chi tiết các task & DAG processor của Apache Airflow
+├── airflow/
+│   ├── Dockerfile                    # Image Airflow 3.1 + ODBC Driver 18 + /opt/etl_venv
+│   └── dags/olist_medallion_elt.py   # DAG điều phối chi tiết gồm 4 TaskGroup & 10 standalone tasks
 │
 ├── docs/
-│   ├── olap_olist.drawio             # Sơ đồ kiến trúc Star Schema (OLAP)
-│   └── oltp_olist.drawio             # Sơ đồ cơ sở dữ liệu giao dịch nguồn (OLTP)
+│   ├── olap_olist.drawio             # Sơ đồ Star Schema tầng Gold (OLAP)
+│   └── oltp_olist.drawio             # Sơ đồ dữ liệu nguồn SQL Server (OLTP)
 │
 ├── sql/
-│   ├── source/                       # Truy vấn kiểm tra sức khỏe nguồn SQL Server
-│   │   └── validate_source.sql       # Baseline row count & integrity check
-│   └── raw/                          # DDL & truy vấn kiểm định tầng Bronze
-│       ├── raw_table.sql             # DDL bảng thô Bronze (Composite Index, Audit columns)
-│       └── validate_bronze.sql       # Truy vấn kiểm tra đối soát tầng Bronze
+│   ├── source/validate_source.sql    # Truy vấn kiểm đếm dòng & dải ngày baseline nguồn SQL Server
+│   └── raw/
+│       ├── raw_table.sql             # DDL khởi tạo 7 bảng Bronze, _etl_watermarks & _etl_run_history
+│       └── validate_bronze.sql       # Truy vấn kiểm toán số dòng, PK null/duplicate & dải ngày Bronze
 │
-├── src/                              # Bộ máy trích xuất & nạp dữ liệu (Python Engine)
-│   ├── config/                       # Quản lý cấu hình & quy tắc trích xuất
-│   │   ├── settings.py               # Nạp biến môi trường, cấu hình engine SQLAlchemy
-│   │   └── extract_rules.yaml        # Quy tắc trích xuất từng bảng (watermark, full, chunk_size)
-│   ├── core/                         # Tiện ích nền tảng dùng chung (Single Responsibility)
-│   │   ├── connection.py             # Quản trị connection pool SQLAlchemy & kiểm tra kết nối DB
-│   │   ├── logger.py                 # Cấu hình log chuẩn UTC (Console & Rotating File Handler)
-│   │   └── alert.py                  # Dịch vụ thông báo cảnh báo qua Webhook (Discord / Slack)
-│   ├── ingestion/                    # Bộ máy hút & nạp dữ liệu thô (E & L)
-│   │   ├── extract.py                # Generator stream từng chunk từ SQL Server theo dải watermark
-│   │   └── load.py                   # Nạp chunk vào Bronze và ghi checkpoint nguyên tử trong 1 transaction
-│   ├── state/                        # Hệ thống quản lý trạng thái & Checkpoint (State Management)
-│   │   ├── watermark.py              # Quản lý mốc watermark (_etl_watermarks) cho incremental load
-│   │   ├── state_manager.py          # Quản lý trạng thái Chunk, Batch & Crash recovery (_pipeline_checkpoints)
-│   │   └── history.py                # Quản lý lưu vết lịch sử vận hành (_etl_run_history)
-│   ├── schema/                       # Quản trị hợp đồng DDL & cấu trúc bảng
-│   │   ├── contract.py               # Kiểm tra hợp đồng cấu trúc cột và khóa chính trước khi nạp
-│   │   ├── evolution.py              # Tự động đồng bộ hóa cột mới phát sinh vào Bronze
-│   │   └── init_schema.py            # Khởi tạo DDL bảng Bronze (Append-Only mode)
-│   └── validate/                     # Kiểm toán & đối soát dữ liệu (Quality Gate)
-│       ├── validate_source.py        # Đo lường số dòng và schema baseline của nguồn
-│       └── validate_target.py        # Kiểm toán số dòng Bronze đối chiếu với baseline nguồn
+├── src/
+│   ├── config/                       # settings.py (đọc .env, tạo SQLAlchemy URI) & extract_rules.yaml
+│   ├── core/                         # connection.py (source/target healthcheck), logger.py (UTC), alert.py (webhook)
+│   ├── ingestion/                    # extract.py (dynamic query + chunk generator), load.py (COPY + ACID chunk commit)
+│   ├── state/                        # state_manager.py (checkpoints), watermark.py (_etl_watermarks), history.py
+│   ├── schema/                       # contract.py (bảo vệ PK), evolution.py (ADD COLUMN tự động), init_schema.py
+│   └── validate/                     # validate_source.py & validate_target.py
 │
-├── tests/                            # Bộ kiểm thử đơn vị & tích hợp Python (Unit + Live Postgres)
-│   ├── test_schema_contract.py       # Test Schema Contract & kiểu dữ liệu Evolution
-│   ├── test_extract_query.py         # Test sinh SQL động (Watermark, Resume, Timezone)
-│   ├── test_state_and_alert.py       # Test cấu hình Checkpoint & Webhook Alert guard
-│   ├── test_airflow_orchestration.py # Test DAG TaskGroup, cờ --preflight/--init-schema & --table
-│   └── test_integration_pipeline.py  # Test End-to-End Crash/Resume & live Postgres ACID/Schema Evolution
+├── tests/                            # 20 bài kiểm thử (Unit + Live PostgreSQL Integration)
+│   ├── test_schema_contract.py       # Kiểm tra Schema Contract & ánh xạ kiểu dữ liệu Evolution
+│   ├── test_extract_query.py         # Kiểm tra sinh SQL động (Watermark, Resume >=, Timezone)
+│   ├── test_state_and_alert.py       # Kiểm tra cấu hình Checkpoint schema & Webhook Alert guard
+│   ├── test_airflow_orchestration.py # Kiểm tra AST DAG, TaskGroup, cờ CLI và roundtrip --skip-validate/--validate-only
+│   └── test_integration_pipeline.py  # Kiểm tra End-to-End Crash Recovery & Live Postgres ACID/Schema Evolution
 │
-└── dbt_transform/                    # Dự án dbt Core mô hình hóa dữ liệu (Silver & Gold)
-    ├── dbt_project.yml               # Cấu hình dự án dbt, chỉ định schema silver và gold
-    ├── profiles.yml                  # Cấu hình kết nối dbt tới PostgreSQL
-    ├── macros/
-    │   ├── generate_schema_name.sql  # Macro tùy biến giữ nguyên tên schema riêng biệt (silver, gold)
-    │   └── unique_combination.sql    # Macro kiểm tra tính duy nhất của khóa tổ hợp
-    ├── models/
-    │   ├── staging/                  # ── [TẦNG SILVER: DEDUP & CLEANING] ──────────
-    │   │   ├── sources.yml           # Khai báo source Bronze, kiểm tra freshness, null & unique
-    │   │   ├── schema.yml            # Data tests & tài liệu các trường bảng Silver
-    │   │   └── stg_*.sql             # 7 model làm sạch và lọc bản ghi mới nhất qua ROW_NUMBER()
-    │   └── marts/                    # ── [TẦNG GOLD: UNIFIED STAR SCHEMA] ─────────
-    │       ├── schema.yml            # Cấu hình quan hệ khóa ngoại (FK), index và tests tầng Marts
-    │       ├── dim_*.sql             # 5 Dimensions (dim_customer SCD Type 2, dim_product, dim_date...)
-    │       └── fact_*.sql            # 2 Fact tables (fact_orders, fact_sales)
-    └── tests/                        # Bộ kiểm thử quy tắc nghiệp vụ tầng Gold (Singular Tests)
-        ├── assert_delivered_orders_have_delivery_date.sql
-        ├── assert_fact_orders_match_sales_amount.sql
-        ├── assert_fact_orders_match_sales_items_count.sql
-        ├── assert_order_dates_chronology.sql
-        ├── assert_sales_amounts_positive.sql
-        └── assert_valid_review_score.sql
+├── dbt_transform/
+│   ├── dbt_project.yml               # Cấu hình schema silver/gold, pre-hook timeout, store_failures -> test_failures
+│   ├── packages.yml                  # Khai báo dbt-labs/dbt_utils
+│   ├── profiles.yml                  # Kết nối PostgreSQL (threads: 4, connect_timeout: 60)
+│   ├── macros/                       # generate_schema_name.sql, unique_combination.sql
+│   ├── snapshots/snp_sellers.sql     # SCD Type 2 theo dõi thay đổi vị trí người bán
+│   ├── models/staging/               # sources.yml, schema.yml & 7 model stg_* (dedup + incremental merge)
+│   ├── models/marts/                 # schema.yml, 5 Dimensions & 2 Facts (fact_orders, fact_sales)
+│   └── tests/                        # 6 singular tests kiểm tra business rules tầng Gold
+│
+└── logs/
+    ├── pipeline.log                  # Log Extract & Load Python chuẩn UTC
+    ├── dbt.log                       # Log thực thi và kiểm định của dbt
+    ├── run_state/                    # JSON snapshot baseline/stat theo từng run_id phục vụ --validate-only
+    └── airflow/                      # Log chi tiết các task & DAG processor của Apache Airflow
 ```
 
 ---
 
-## 4. Hướng dẫn Triển khai (Deployment Guide)
+## 5. Installation
 
-### 4.1. Yêu cầu Hệ thống (Prerequisites)
-* **Python**: Phiên bản 3.11 trở lên
-* **PostgreSQL**: Phiên bản 15 hoặc 16
-* **Microsoft SQL Server**: 2017, 2019, 2022 hoặc SQL Server Express
-* **ODBC Driver**: Microsoft ODBC Driver 18 for SQL Server (hoặc Driver 17)
-* **Docker & Docker Compose**: (Tùy chọn khi chạy containerized)
-
-### 4.2. Cài đặt Môi trường (Environment Setup)
-
-1. **Clone repository và di chuyển vào thư mục:**
-   ```bash
+1. **Yêu cầu tiên quyết**:
+   - **Python** 3.12 (hoặc 3.11+)
+   - **PostgreSQL** 15/16 và **Microsoft SQL Server** 2017/2019/2022
+   - **Microsoft ODBC Driver 18 for SQL Server** (hoặc Driver 17)
+   - **Docker Desktop / Docker Compose** (nếu chạy Airflow containerized)
+2. **Clone repository và tạo môi trường ảo**:
+   ```powershell
    git clone https://github.com/your-username/etl_ecommerce_data.git
    cd etl_ecommerce_data
+   python -m venv .venv
+   .\.venv\Scripts\Activate.ps1
    ```
-
-2. **Khởi tạo và kích hoạt môi trường ảo Python:**
-   * Trên Windows (PowerShell):
-     ```powershell
-     python -m venv .venv
-     .\.venv\Scripts\Activate.ps1
-     ```
-   * Trên Linux / macOS:
-     ```bash
-     python3 -m venv .venv
-     source .venv/bin/activate
-     ```
-
-3. **Cài đặt các thư viện phụ thuộc:**
-   ```bash
+   *(Trên Linux/macOS: `python3 -m venv .venv && source .venv/bin/activate`)*
+3. **Cài đặt thư viện Python**:
+   ```powershell
    pip install --upgrade pip
    pip install -r requirements.txt
    ```
-
-4. **Thiết lập biến môi trường:**
-   Tạo file `.env` từ file mẫu `.env.example`:
-   ```bash
-   cp .env.example .env
-   ```
-   Cấu hình thông số kết nối:
-   ```ini
-   # Cấu hình log
-   LOG_LEVEL_CONSOLE=INFO
-   LOG_LEVEL_FILE=DEBUG
-
-   # Cấu hình nguồn SQL Server (OLTP)
-   SRC_DB_DRIVER=ODBC Driver 18 for SQL Server
-   SRC_DB_SERVER=localhost
-   SRC_DB_PORT=1433
-   SRC_DB_NAME=olist
-   SRC_DB_USER=sa
-   SRC_DB_PASSWORD=YourStrongPassword123!
-   SRC_DB_TRUSTED_CONNECTION=no
-   SRC_DB_TRUST_SERVER_CERTIFICATE=yes
-
-   # Cấu hình đích PostgreSQL Data Warehouse
-   TGT_DB_HOST=localhost
-   TGT_DB_PORT=5432
-   TGT_DB_NAME=olist_dwh
-   TGT_DB_USER=postgres
-   TGT_DB_PASSWORD=postgres
-   TGT_DB_SCHEMA=bronze
-
-   # Cấu hình hiệu năng pipeline
-   ETL_MAX_WORKERS=4
-   CHUNK_SIZE=25000
-
-   # Cấu hình Apache Airflow (Docker Compose)
-   AIRFLOW_UID=50000
-   AIRFLOW_PORT=8080
-   AIRFLOW_ADMIN_USER=admin
-   AIRFLOW_ADMIN_PASSWORD=admin
+4. **Cài đặt dbt package (`dbt_utils`) nếu chạy dbt trực tiếp trên máy**:
+   ```powershell
+   cd dbt_transform
+   ..\.venv\Scripts\dbt.exe deps
+   cd ..
    ```
 
-### 4.3. Cách Chạy Pipeline (Execution Options)
+---
 
-#### Lựa chọn 1: Triển khai & Điều phối tự động bằng Apache Airflow + Docker Compose (Khuyên dùng)
+## 6. Configuration
 
-Khởi chạy cụm **Apache Airflow 3.1** (tự động kết nối tới SQL Server và PostgreSQL DWH đang chạy trên máy host qua `host.docker.internal`, cần cấp Docker Desktop tối thiểu ~4 GB RAM):
+Tạo file `.env` từ template [`.env.example`](file:///d:/code/personal_project/etl_ecommerce_data/.env.example):
+
 ```powershell
+Copy-Item .env.example .env
+```
+
+Điền đầy đủ các nhóm biến trong `.env`:
+
+```ini
+# Logging
+LOG_LEVEL_CONSOLE=INFO
+LOG_LEVEL_FILE=DEBUG
+
+# Nguồn SQL Server (OLTP)
+SRC_DB_DRIVER=ODBC Driver 18 for SQL Server
+SRC_DB_SERVER=localhost
+SRC_DB_PORT=1433
+SRC_DB_NAME=E_commerce
+SRC_DB_TRUSTED_CONNECTION=no
+SRC_DB_TRUST_SERVER_CERTIFICATE=yes
+SRC_DB_USER=sa
+SRC_DB_PASSWORD=YourStrongPassword
+
+# Đích PostgreSQL Data Warehouse
+TGT_DB_HOST=localhost
+TGT_DB_PORT=5432
+TGT_DB_NAME=olist_dwh
+TGT_DB_USER=postgres
+TGT_DB_PASSWORD=YourPostgresPassword
+TGT_DB_SCHEMA=bronze
+
+# Vận hành & Cảnh báo
+ETL_MAX_WORKERS=4
+SRC_DB_TIMEZONE=UTC
+ALERT_WEBHOOK_URL=
+ALERT_ON_SCRIPT_ERROR=true
+
+# Apache Airflow 3.1 (Docker Compose)
+AIRFLOW_UID=50000
+AIRFLOW_PORT=8080
+AIRFLOW_ADMIN_USER=admin
+AIRFLOW_ADMIN_PASSWORD=admin
+AIRFLOW_DB_USER=airflow
+AIRFLOW_DB_PASSWORD=airflow
+AIRFLOW_DB_NAME=airflow
+AIRFLOW_FERNET_KEY=your_fernet_key
+AIRFLOW_JWT_SECRET=your_jwt_secret
+```
+
+*(Lưu ý: khi chạy qua [docker-compose.yml](file:///d:/code/personal_project/etl_ecommerce_data/docker-compose.yml#L26-L36), container Airflow tự động ghi đè `SRC_DB_SERVER=host.docker.internal`, `TGT_DB_HOST=host.docker.internal` và `ALERT_ON_SCRIPT_ERROR=false` để tránh gửi trùng cảnh báo khi Airflow retry.)*
+
+Quy tắc trích xuất từng bảng (`strategy`, `chunksize`, `lookback_days`, `primary_keys`, `columns`) được cấu hình tập trung trong [src/config/extract_rules.yaml](file:///d:/code/personal_project/etl_ecommerce_data/src/config/extract_rules.yaml).
+
+---
+
+## 7. Pipeline Execution
+
+### Cách 1: Chạy tự động qua Apache Airflow + Docker Compose (Khuyên dùng)
+
+```powershell
+# Khởi tạo & bật cụm Airflow 3.1
 docker compose up -d --build
 ```
-Sau khi khởi động xong, truy cập **http://localhost:8080** (tài khoản mặc định `admin` / `admin`), chọn DAG **`olist_medallion_elt`** và nhấn **Trigger DAG** (có thể bật `full_refresh: true` qua **Trigger DAG w/ config** để chạy `--full-refresh`, hoặc chờ lịch tự động lúc **02:00 sáng** hằng ngày giờ Việt Nam). Để dừng cụm, chạy:
+
+Sau khi các container ở trạng thái `Up (healthy)` (`docker compose ps`), truy cập **http://localhost:8080**, chọn DAG **`olist_medallion_elt`** và bấm **Trigger DAG** (có tham số `full_refresh` mặc định `false`, lịch tự động lúc **02:00 sáng** hằng ngày theo giờ `Asia/Ho_Chi_Minh`).
+
 ```powershell
+# Tắt cụm Airflow (vẫn giữ dữ liệu airflow_metadb_data)
 docker compose down
 ```
 
-#### Lựa chọn 2: Chạy thủ công / Debug cục bộ trên Python (Windows PowerShell)
+### Cách 2: Chạy thủ công / Debug cục bộ trên PowerShell
 
 ```powershell
-# 1. Kiểm tra kết nối & khởi tạo trước schema Bronze + bảng metadata (nếu cần):
-.\.venv\Scripts\python.exe main.py --preflight
+# 1. Kiểm tra kết nối & khởi tạo schema Bronze + bảng metadata
+.\.venv\Scripts\python.exe main.py --preflight-source
+.\.venv\Scripts\python.exe main.py --preflight-target
 .\.venv\Scripts\python.exe main.py --init-schema
 
-# 2. Chạy nạp dữ liệu tầng Bronze (Append-Only mode) — toàn bộ hoặc tách bước nạp/đối soát:
+# 2. Nạp tầng Bronze (toàn bộ 7 bảng song song, tuần tự, hoặc tách riêng 1 bảng)
 .\.venv\Scripts\python.exe main.py
+.\.venv\Scripts\python.exe main.py --sequential
 .\.venv\Scripts\python.exe main.py --table orders --skip-validate --run-id local_run_1
 .\.venv\Scripts\python.exe main.py --validate-only --table orders --run-id local_run_1
 
-# 3. Chạy ở chế độ tuần tự (Sequential mode - dành cho máy cấu hình thấp):
-.\.venv\Scripts\python.exe main.py --sequential
-
-# 4. Chạy các bước biến đổi & kiểm định dbt trực tiếp:
+# 3. Chạy biến đổi & kiểm định dbt
 cd dbt_transform
-..\.venv\Scripts\dbt.exe source freshness                     # Kiểm tra độ tươi mới dữ liệu nguồn
-..\.venv\Scripts\dbt.exe test --select source:*                 # Kiểm tra dữ liệu thô tầng Bronze
-..\.venv\Scripts\dbt.exe run --select staging                   # Chỉ chạy tầng Silver
-..\.venv\Scripts\dbt.exe test --select staging --exclude source:*  # Quality Gate tầng Silver
-..\.venv\Scripts\dbt.exe snapshot                               # Chạy dbt Snapshot (SCD Type 2)
-..\.venv\Scripts\dbt.exe run --select marts                     # Chỉ chạy tầng Gold
-..\.venv\Scripts\dbt.exe test --select marts,test_type:generic  # Kiểm tra PK/FK/relationships tầng Gold
-..\.venv\Scripts\dbt.exe test --select test_type:singular       # Kiểm tra 6 Business Rules tầng Gold
+..\.venv\Scripts\dbt.exe source freshness
+..\.venv\Scripts\dbt.exe test --select source:*
+..\.venv\Scripts\dbt.exe run --select staging
+..\.venv\Scripts\dbt.exe test --select staging --exclude source:*
+..\.venv\Scripts\dbt.exe snapshot
+..\.venv\Scripts\dbt.exe run --select marts
+..\.venv\Scripts\dbt.exe test --select marts,test_type:generic
+..\.venv\Scripts\dbt.exe test --select test_type:singular
 cd ..
 ```
 
 ---
 
-## 5. Khung Kiểm thử Toàn diện (Testing & Quality Assurance)
+## 8. Data Transformation
 
-Dự án thiết lập hệ thống kiểm định chất lượng dữ liệu đa tầng theo đúng chuẩn Data Observability:
+1. **Tầng Bronze (`bronze`, `etl_metadata`)**:
+   - Nạp nguyên bản theo chiến lược trong [extract_rules.yaml](file:///d:/code/personal_project/etl_ecommerce_data/src/config/extract_rules.yaml): `lookback_window` cho `orders` (60 ngày) và `order_reviews` (3 ngày); `full` reload cho 5 bảng còn lại (`customers`, `order_items`, `order_payments`, `products`, `sellers`).
+   - Bổ sung 2 cột audit (`_extracted_at`, `_batch_id`) và cập nhật checkpoint/watermark ngay trong transaction.
+2. **Tầng Silver (`silver`)**:
+   - 7 model `stg_*` chạy `materialized='incremental'` với `incremental_strategy='merge'` và `unique_key` + unique index.
+   - Khử trùng lặp bằng `ROW_NUMBER() OVER (PARTITION BY pk ORDER BY _extracted_at DESC)`, chuẩn hóa kiểu dữ liệu và chuỗi (`lower(trim(...))`).
+   - Snapshot [snp_sellers.sql](file:///d:/code/personal_project/etl_ecommerce_data/dbt_transform/snapshots/snp_sellers.sql) theo dõi lịch sử thay đổi địa điểm người bán theo chiến lược `check` (SCD Type 2).
+3. **Tầng Gold (`gold`)**:
+   - Xây dựng 5 bảng Dimension (`dim_date`, `dim_location`, `dim_product`, `dim_customer` SCD Type 2, `dim_seller` SCD Type 2 từ `snp_sellers`) và 2 bảng Fact (`fact_orders`, `fact_sales`) với Surrogate Key sinh bởi `dbt_utils.generate_surrogate_key`.
+   - Có sẵn bản ghi unknown (`-1`/`-2`/`-3` hoặc UUID `00000000-0000-0000-0000-000000000000`) để bảo toàn toàn vẹn tham chiếu.
 
-### 5.1. Ma trận Kiểm thử 4 tầng (Multi-Tier Test Matrix)
+---
 
-| Vị trí | Nội dung kiểm tra | Mục đích & Chi tiết triển khai | Nơi cấu hình trong dự án |
+## 9. Data Quality
+
+Dự án áp dụng khung kiểm thử chất lượng 4 tầng kết hợp kiểm thử Python:
+
+| Tầng kiểm tra | Cơ chế / Selector | Nội dung kiểm định | Vị trí cấu hình |
 | :--- | :--- | :--- | :--- |
-| **1. Source / Bronze** | `NULL`, `duplicate`, `schema`, `freshness` | **Kiểm tra dữ liệu đầu vào:**<br>• `freshness`: Cảnh báo nếu dữ liệu không có cập nhật mới sau 24h, báo lỗi sau 48h.<br>• `not_null`, `unique`: Giám sát tính toàn vẹn khóa thô.<br>• `contract.py`: Chặn nạp nếu nguồn bị thiếu cột khóa chính. | [dbt_transform/models/staging/sources.yml](file:///d:/code/personal_project/etl_ecommerce_data/dbt_transform/models/staging/sources.yml)<br>[src/schema/contract.py](file:///d:/code/personal_project/etl_ecommerce_data/src/schema/contract.py) |
-| **2. Silver Staging** | `not_null`, `unique`, `accepted_values` | **Kiểm tra dữ liệu sau làm sạch:**<br>• Đảm bảo khóa chính sau khử trùng lặp là duy nhất 100%.<br>• Trạng thái đơn hàng thuộc tập giá trị cho phép (`delivered`, `shipped`, `canceled`...). | [dbt_transform/models/staging/schema.yml](file:///d:/code/personal_project/etl_ecommerce_data/dbt_transform/models/staging/schema.yml) |
-| **3. Fact / Dimension** | `PK`, `FK`, `relationships` | **Kiểm tra tính toàn vẹn mô hình:**<br>• Ràng buộc khóa ngoại: 100% bản ghi Fact phải tham chiếu đúng Dimension tồn tại, không có đơn hàng mồ côi.<br>• Kiểm tra tính duy nhất của Surrogate Keys. | [dbt_transform/models/marts/schema.yml](file:///d:/code/personal_project/etl_ecommerce_data/dbt_transform/models/marts/schema.yml) |
-| **4. Gold** | `Tổng doanh thu`, `Số lượng`, `Quy tắc nghiệp vụ` | **Đảm bảo dữ liệu phân tích chính xác tuyệt đối:**<br>• Đối chiếu doanh thu: Tổng tiền trên `fact_orders` khớp với tổng các dòng hàng trên `fact_sales`.<br>• Đối chiếu số lượng: Số mặt hàng trên `fact_orders` khớp 100% số dòng hàng thực tế trên `fact_sales`.<br>• Kiểm tra logic ngày: Ngày giao hàng phải sau ngày đặt hàng. | [dbt_transform/tests/](file:///d:/code/personal_project/etl_ecommerce_data/dbt_transform/tests/) |
+| **1. Schema & Source / Bronze** | `contract.py`, `validate_target.py`, `source freshness`, `source:*` | Chặn thiếu cột PK từ nguồn; đối soát số dòng/mốc thời gian với baseline; cảnh báo freshness 24h / lỗi 48h; kiểm tra `not_null` / `unique` thô. | [src/schema/contract.py](file:///d:/code/personal_project/etl_ecommerce_data/src/schema/contract.py)<br>[dbt_transform/models/staging/sources.yml](file:///d:/code/personal_project/etl_ecommerce_data/dbt_transform/models/staging/sources.yml) |
+| **2. Silver Staging** | `staging --exclude source:*` | `not_null`, `unique`, `unique_combination`, và `accepted_values` cho `order_status`, `payment_type`, `review_score`. | [dbt_transform/models/staging/schema.yml](file:///d:/code/personal_project/etl_ecommerce_data/dbt_transform/models/staging/schema.yml) |
+| **3. Gold Schema** | `marts,test_type:generic` | Kiểm tra duy nhất Surrogate Keys và ràng buộc khóa ngoại (`relationships`) giữa Fact và toàn bộ Dimensions. | [dbt_transform/models/marts/schema.yml](file:///d:/code/personal_project/etl_ecommerce_data/dbt_transform/models/marts/schema.yml) |
+| **4. Gold Business Rules** | 6 singular tests (`assert_*.sql`) | Đối chiếu doanh thu & số lượng item giữa `fact_orders` và `fact_sales`, kiểm tra thứ tự ngày đơn hàng, giá/phí không âm, điểm review 1–5. | [dbt_transform/tests/](file:///d:/code/personal_project/etl_ecommerce_data/dbt_transform/tests/) |
 
-### 5.2. Chạy Kiểm thử Đơn vị & Tích hợp Python (Unit + Live Postgres Tests)
-Kiểm tra Schema Contract, Dynamic SQL, cấu trúc DAG `TaskGroup`, luồng Crash Recovery / Resume và ACID checkpointing + Schema Evolution trực tiếp trên PostgreSQL (cũng chạy tự động kèm PostgreSQL 16 service container trên GitHub Actions CI):
+Bất kỳ bản ghi nào vi phạm test dbt đều được tự động lưu vào schema `test_failures` trên PostgreSQL (cấu hình `+store_failures: true` trong [dbt_transform/dbt_project.yml](file:///d:/code/personal_project/etl_ecommerce_data/dbt_transform/dbt_project.yml#L34-L37)).
+
+Chạy toàn bộ bộ kiểm thử tự động Python (20 test cases gồm Unit Tests, DAG AST, Crash/Resume & Live PostgreSQL Integration):
+
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-### 5.3. Chạy Kiểm thử Chất lượng Dữ liệu dbt
-Thực thi toàn bộ các bài test schema và quy tắc nghiệp vụ:
-```powershell
-cd dbt_transform
-..\.venv\Scripts\dbt.exe test
-cd ..
-```
-*Lưu ý: Bất kỳ bản ghi nào vi phạm quy tắc kiểm thử sẽ được dbt tự động ghi nhận vào schema `test_failures` trên PostgreSQL để kỹ sư dữ liệu dễ dàng truy vết nguyên nhân gốc rễ (Root Cause Analysis).*
+---
+
+## 10. Monitoring and Logging
+
+- **Airflow Web UI (`http://localhost:8080`)**: Giám sát trực quan trạng thái từng bảng/model qua 4 `TaskGroup` (`extract_load_bronze`, `dbt_silver`, `dbt_gold`, `dbt_test_business_rules`) và 10 task độc lập.
+- **Webhook Alerting ([alert.py](file:///d:/code/personal_project/etl_ecommerce_data/src/core/alert.py) & [olist_medallion_elt.py](file:///d:/code/personal_project/etl_ecommerce_data/airflow/dags/olist_medallion_elt.py#L60-L91))**: Gửi thông báo qua Slack/Discord khi task Airflow thất bại sau các lần retry (`on_failure_callback`).
+- **Hệ thống Log & Metadata tách tầng**:
+  - [logs/pipeline.log](file:///d:/code/personal_project/etl_ecommerce_data/logs/pipeline.log): Log Extract & Load chuẩn UTC (`RotatingFileHandler`).
+  - [logs/dbt.log](file:///d:/code/personal_project/etl_ecommerce_data/logs/dbt.log): Log biên dịch SQL và kết quả chạy/test của dbt.
+  - `logs/airflow/`: Log chi tiết từng task attempt và `dag_processor` của Airflow.
+  - Bảng `etl_metadata._pipeline_checkpoints`, `etl_metadata._pipeline_chunk_checkpoints`, `bronze._etl_watermarks`, và `bronze._etl_run_history` lưu trạng thái chunk, mốc watermark và lịch sử mỗi batch nạp.
 
 ---
 
-## 6. Truy vấn Mẫu Phân tích Dữ liệu tầng Gold (Sample Analytics Queries)
+## 11. Results
 
-### 6.1. Doanh thu theo tháng & Đánh giá mức độ hài lòng khách hàng
+- Pipeline vận hành hoàn chỉnh end-to-end từ SQL Server qua PostgreSQL Data Warehouse với đầy đủ 5 schema mục tiêu: `bronze`, `etl_metadata`, `silver`, `gold`, và `test_failures`.
+- Bộ kiểm thử Python cục bộ đạt **`20/20` tests passed** (bao gồm kiểm chứng crash recovery `IN_PROGRESS` -> resume `>= watermark`, ACID chunk rollback, và Schema Evolution trực tiếp trên PostgreSQL).
+- Workflow [GitHub Actions CI](file:///d:/code/personal_project/etl_ecommerce_data/.github/workflows/ci.yml) tự động kiểm tra 3 job: `python-unit-tests` (kèm service `postgres:16`), `dbt-validation` (bootstrap Bronze + chạy/test đầy đủ Medallion trên `postgres:16`), và `docker-build`.
+- Dữ liệu tầng `gold` sẵn sàng cho truy vấn phân tích BI, ví dụ:
+
 ```sql
+-- Doanh thu theo tháng & điểm hài lòng trung bình
 SELECT
     d.year,
     d.month,
@@ -375,29 +352,19 @@ GROUP BY d.year, d.month, d.month_name
 ORDER BY d.year, d.month;
 ```
 
-### 6.2. Phân tích lịch sử thay đổi địa điểm khách hàng (SCD Type 2)
-```sql
-SELECT
-    dc.customer_unique_id,
-    dl.city_name,
-    dl.state_code,
-    dc.valid_from,
-    dc.valid_to,
-    dc.is_current
-FROM gold.dim_customer dc
-INNER JOIN gold.dim_location dl ON dc.location_key = dl.location_key
-WHERE dc.customer_unique_id IN (
-    SELECT customer_unique_id
-    FROM gold.dim_customer
-    GROUP BY customer_unique_id
-    HAVING COUNT(*) > 1
-)
-ORDER BY dc.customer_unique_id, dc.valid_from;
-```
+---
+
+## 12. Future Improvements
+
+- **Tách riêng `Extract` và `Load` qua vùng Landing Zone (Parquet / MinIO / S3)**: Lưu chunk trung gian dưới dạng Parquet/Object Storage để bước Load vào PostgreSQL có thể retry độc lập mà không cần truy vấn lại SQL Server.
+- **Nối luồng End-to-End theo từng bảng (`Per-table Lineage`)**: Cho phép các bảng nhỏ (`sellers`, `products`) đi thẳng từ `bronze_<table>` -> `silver_stg_<table>` mà không cần chờ các bảng lớn (`order_items`).
+- **Tích hợp BI Dashboard & dbt Docs Hosting**: Kết nối trực tiếp schema `gold` với Metabase / Apache Superset / Power BI và xuất bản `dbt docs generate` tự động.
+- **Mở rộng CI/CD**: Bổ sung SQL Server container vào CI để test E2E cả luồng extract ODBC thực tế trên GitHub Actions.
 
 ---
 
-## 7. Giấy phép & Tác giả (License & Author)
-* **Dự án**: Olist E-Commerce Medallion Data Engineering Pipeline
-* **Bộ dữ liệu**: Brazilian E-Commerce Public Dataset by [Olist](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce)
-* **Giấy phép**: MIT License.
+## 13. Author
+
+- **Tác giả**: Toan Pham (`phamminhtoan318@gmail.com`)
+- **Bộ dữ liệu**: [Brazilian E-Commerce Public Dataset by Olist](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce)
+- **Giấy phép**: MIT License
