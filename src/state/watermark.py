@@ -29,12 +29,12 @@ def get_watermark_states(tgt_engine, tgt_schema=TGT_DB_SCHEMA):
                 if max_val is not None:
                     watermark_states[logical_name] = str(max_val)[:19]
     except Exception as e:
-        logger.warning(f"[WATERMARK STATE] Chưa thể đọc mốc watermark từ '{tgt_schema}' ({e}) -> Sẽ dùng mốc mặc định.")
+        logger.warning(f"Chưa thể đọc mốc watermark từ '{tgt_schema}' ({e}) -> Sẽ dùng mốc mặc định.")
 
     if watermark_states:
-        logger.info(f"[WATERMARK STATE] Đã đọc mốc watermark từ Target DB: {watermark_states}")
+        logger.info(f"Đã đọc mốc watermark từ Target DB: {watermark_states}")
     else:
-        logger.info("[WATERMARK STATE] Chưa có mốc watermark trước đó trên Target DB (sẽ dùng default_start_watermark nếu chạy incremental).")
+        logger.info("Chưa có mốc watermark trước đó trên Target DB (sẽ dùng default_start_watermark nếu chạy incremental).")
     return watermark_states
 
 

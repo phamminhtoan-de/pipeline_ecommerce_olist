@@ -42,7 +42,7 @@ def sync_target_schema_evolution(tgt_engine, tgt_schema, target_table, chunk_col
     try:
         existing_tgt_cols = {c["name"].lower() for c in tgt_inspector.get_columns(target_table, schema=tgt_schema)}
     except Exception as e:
-        logger.debug(f"[SCHEMA EVOLUTION] Bảng '{tgt_schema}.{target_table}' chưa có hoặc không đọc được cột: {e}")
+        logger.debug(f"Bảng '{tgt_schema}.{target_table}' chưa có hoặc không đọc được cột: {e}")
         return []
 
     added_columns = []
@@ -57,7 +57,7 @@ def sync_target_schema_evolution(tgt_engine, tgt_schema, target_table, chunk_col
                 pg_type = map_source_type_to_postgres(col, col_meta)
 
             logger.info(
-                f"⚡ [SCHEMA EVOLUTION] Phát hiện cột mới '{col}' ({pg_type}) từ nguồn! "
+                f"⚡ Phát hiện cột mới '{col}' ({pg_type}) từ nguồn! "
                 f"Đang tự động cập nhật schema đích '{tgt_schema}.{target_table}'..."
             )
             with tgt_engine.begin() as conn:
@@ -65,7 +65,7 @@ def sync_target_schema_evolution(tgt_engine, tgt_schema, target_table, chunk_col
                     text(f'ALTER TABLE "{tgt_schema}"."{target_table}" ADD COLUMN IF NOT EXISTS "{col}" {pg_type};')
                 )
             logger.info(
-                f"✅ [SCHEMA EVOLUTION] Đã bổ sung thành công cột '{col}' ({pg_type}) vào '{tgt_schema}.{target_table}'."
+                f"✅ Đã bổ sung thành công cột '{col}' ({pg_type}) vào '{tgt_schema}.{target_table}'."
             )
             added_columns.append(col)
             existing_tgt_cols.add(col.lower())

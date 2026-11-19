@@ -64,7 +64,7 @@ def stream_load_table_to_postgres(
         last_batch_id = None
         with tgt_engine.begin() as conn:
             conn.execute(text(f'TRUNCATE TABLE "{tgt_schema}"."{table_name}";'))
-            logger.info(f'[TRUNCATE] Đã làm sạch bảng "{tgt_schema}"."{table_name}" (giữ nguyên cấu trúc DDL).')
+            logger.info(f'Đã làm sạch (TRUNCATE) bảng "{tgt_schema}"."{table_name}" (giữ nguyên cấu trúc DDL).')
 
             for chunk in chunk_stream:
                 if chunk.empty:
@@ -97,7 +97,7 @@ def stream_load_table_to_postgres(
                         overwrite=True,
                     )
                     logger.info(
-                        f"[WATERMARK] Đã cập nhật mốc watermark ban đầu cho '{logical_name}' "
+                        f"Đã cập nhật mốc watermark ban đầu cho '{logical_name}' "
                         f"({watermark_column} = {str(max_val)[:19]}) sau khi nạp Full Refresh."
                     )
     else:
@@ -169,12 +169,12 @@ def stream_load_table_to_postgres(
 
                 total_rows += chunk_rows
                 logger.debug(
-                    f"[BATCH #{batch_idx} COMMIT] Bảng '{logical_name}': Đã commit {chunk_rows:,} dòng "
+                    f"Batch #{batch_idx} commit bảng '{logical_name}': đã commit {chunk_rows:,} dòng "
                     f"(checkpoint: {str(chunk_max_wm)[:19] if chunk_max_wm else 'N/A'}, lũy kế: {total_rows:,} dòng)"
                 )
         except Exception as e:
             logger.error(
-                f"[CHECKPOINT ROLLBACK] Bảng '{logical_name}' gặp lỗi tại chunk #{batch_idx}: {e}. "
+                f"Rollback checkpoint bảng '{logical_name}' tại chunk #{batch_idx}: {e}. "
                 f"-> Đã rollback riêng chunk #{batch_idx}. Tiến độ đã checkpoint thành công ({total_rows:,} dòng, "
                 f"checkpoint: {str(last_checkpoint_wm)[:19] if last_checkpoint_wm else 'N/A'}) vẫn được bảo toàn trong DB!"
             )
@@ -193,7 +193,7 @@ def load_single_table(logical_name, actual_name, rule, chunk_stream, tgt_engine,
     strategy = rule.get("strategy", "cancel")
     t0 = time.time()
 
-    logger.info(f"[PIPELINE] Bắt đầu nạp {logical_name} (nguồn: {actual_name}) -> {tgt_schema}.{target_table}")
+    logger.info(f"Bắt đầu nạp {logical_name} (nguồn: {actual_name}) -> {tgt_schema}.{target_table}")
     try:
         rule = rule or {}
         if rule.get("resolved_columns"):
@@ -217,7 +217,7 @@ def load_single_table(logical_name, actual_name, rule, chunk_stream, tgt_engine,
         )
         elapsed = time.time() - t0
         logger.info(
-            f"[PIPELINE] Đã nạp thành công {loaded_rows:,} dòng vào {tgt_schema}.{target_table} ({elapsed:.2f}s)"
+            f"Đã nạp thành công {loaded_rows:,} dòng vào {tgt_schema}.{target_table} ({elapsed:.2f}s)"
         )
         return {
             "source_table": actual_name,
@@ -230,7 +230,7 @@ def load_single_table(logical_name, actual_name, rule, chunk_stream, tgt_engine,
     except ChunkLoadError as cle:
         elapsed = time.time() - t0
         logger.warning(
-            f"[PIPELINE PARTIAL] Bảng '{logical_name}' dừng ở chunk #{cle.batch_idx}. "
+            f"Nạp từng phần bảng '{logical_name}' dừng ở chunk #{cle.batch_idx}. "
             f"Đã lưu checkpoint {cle.committed_rows:,} dòng vào {tgt_schema}.{target_table} "
             f"(mốc watermark: {str(cle.last_checkpoint_wm)[:19] if cle.last_checkpoint_wm else 'N/A'})."
         )
@@ -246,7 +246,7 @@ def load_single_table(logical_name, actual_name, rule, chunk_stream, tgt_engine,
     except Exception as e:
         elapsed = time.time() - t0
         logger.error(
-            f"[PIPELINE ERROR] Lỗi khi nạp bảng '{logical_name}' -> Đã rollback: {e}"
+            f"Lỗi khi nạp bảng '{logical_name}' -> Đã rollback: {e}"
         )
         return {
             "source_table": actual_name,

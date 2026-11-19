@@ -18,7 +18,7 @@ def send_alert_webhook(message):
             method="POST",
         )
         urllib.request.urlopen(req, timeout=5)
-        logger.info("[ALERT WEBHOOK] Đã gửi thông báo cảnh báo qua Webhook thành công.")
+        logger.info("Đã gửi thông báo cảnh báo qua Webhook thành công.")
     except Exception as e:
-        logger.warning(f"[ALERT WEBHOOK] Không thể gửi thông báo qua Webhook: {e}")
+        logger.warning(f"Không thể gửi thông báo qua Webhook: {e}")
 

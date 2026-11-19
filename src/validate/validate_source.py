@@ -17,7 +17,7 @@ def parse_sql_statements(sql_text):
 
 
 def measure_source_baseline(schema="dbo", engine=None, watermark_states=None, batch_time=None, in_progress_tables=None):
-    logger.info("=== [CƠ CHẾ 1 - PRE-EXTRACT] BẮT ĐẦU ĐO ĐẠC THÔNG SỐ CHUẨN TỪ SOURCE ===")
+    logger.info("=== BẮT ĐẦU ĐO ĐẠC THÔNG SỐ BASELINE TỪ SOURCE ===")
     engine = engine or get_source_engine()
     watermark_states = watermark_states or {}
     in_progress_set = in_progress_tables or set()
@@ -49,9 +49,9 @@ def measure_source_baseline(schema="dbo", engine=None, watermark_states=None, ba
                     pk_issues.append(mapping)
 
         if pk_issues:
-            logger.warning(f"[BASELINE WARNING] Phát hiện {len(pk_issues)} cảnh báo khóa chính tại nguồn: {pk_issues}")
+            logger.warning(f"Cảnh báo Baseline: phát hiện {len(pk_issues)} cảnh báo khóa chính tại nguồn: {pk_issues}")
         else:
-            logger.info("[BASELINE] Source: 0 lỗi Khóa chính (NULL & Duplicate đều bằng 0)")
+            logger.info("Baseline Source: 0 lỗi khóa chính (NULL & Duplicate đều bằng 0).")
 
         date_ranges = {}
         if len(statements) >= 3:
@@ -73,7 +73,7 @@ def measure_source_baseline(schema="dbo", engine=None, watermark_states=None, ba
             rule["resume_in_progress"] = logical_name in in_progress_set
             strategy = str(rule.get("strategy", "full")).lower().strip()
             if strategy == "cancel":
-                logger.warning(f"[BASELINE SKIP] Bảng '{logical_name}' có strategy='cancel' -> Bỏ qua đo baseline.")
+                logger.warning(f"Bỏ qua đo baseline bảng '{logical_name}' do strategy='cancel'.")
                 continue
 
             actual_name = resolve_table_name(existing_tables, candidates)
@@ -131,10 +131,10 @@ def measure_source_baseline(schema="dbo", engine=None, watermark_states=None, ba
             }
 
             logger.info(
-                f"[BASELINE] Bảng '{logical_name:<14}' ({actual_name:<28}): "
-                f"Tổng nguồn {expected_row_count:>7,} dòng | Kỳ vọng trích xuất {expected_extract_rows:>7,} dòng | "
+                f"Baseline '{logical_name:<14}' ({actual_name:<28}): "
+                f"tổng nguồn {expected_row_count:>7,} dòng | kỳ vọng trích xuất {expected_extract_rows:>7,} dòng | "
                 f"{len(expected_columns):>2} cột nguồn (+2 cột audit)"
             )
 
-    logger.info("=== [CƠ CHẾ 1 - PRE-EXTRACT] ĐÃ LƯU THÀNH CÔNG THÔNG SỐ BASELINE VÀO BỘ NHỚ ===")
+    logger.info("=== ĐÃ LƯU THÀNH CÔNG THÔNG SỐ BASELINE VÀO BỘ NHỚ ===")
     return source_baseline

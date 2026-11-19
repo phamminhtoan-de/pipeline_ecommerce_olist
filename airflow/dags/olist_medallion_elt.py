@@ -25,7 +25,6 @@ DBT_ENSURE_DEPS = f'if [ ! -d "{DBT_PROJECT_DIR}/dbt_packages/dbt_utils" ]; then
 
 
 def on_task_failure_alert(context):
-    """Gửi cảnh báo cấp Airflow qua Webhook khi task thất bại hoàn toàn sau khi hết retry."""
     webhook_url = os.getenv("ALERT_WEBHOOK_URL", "").strip()
     if not webhook_url:
         return
@@ -39,7 +38,7 @@ def on_task_failure_alert(context):
     try_number = getattr(ti, "try_number", "?")
 
     message = (
-        f"🚨 [AIRFLOW DAG FAILURE] Task `{task_id}` đã thất bại sau tất cả các lần retry\n"
+        f"🚨 Airflow DAG thất bại tại task `{task_id}` sau tất cả các lần retry\n"
         f"- DAG: `{dag_id}`\n"
         f"- Run ID: `{run_id}`\n"
         f"- Logical Date: `{logical_date}`\n"

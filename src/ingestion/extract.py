@@ -22,7 +22,7 @@ def _format_batch_cutoff(batch_time):
             try:
                 target_tz = ZoneInfo(SRC_DB_TIMEZONE)
             except ZoneInfoNotFoundError:
-                logger.warning(f"[TIMEZONE] SRC_DB_TIMEZONE='{SRC_DB_TIMEZONE}' không hợp lệ -> fallback về UTC.")
+                logger.warning(f"Múi giờ SRC_DB_TIMEZONE='{SRC_DB_TIMEZONE}' không hợp lệ -> fallback về UTC.")
                 target_tz = timezone.utc
             batch_time = batch_time.astimezone(target_tz)
         return batch_time.strftime("%Y-%m-%d %H:%M:%S")
@@ -49,12 +49,12 @@ def build_dynamic_query(
 ):
     strategy = rule.get("strategy")
     if not strategy:
-        logger.error(f"[{logical_name}] LỖI CẤU HÌNH: Thiếu 'strategy' trong YAML! -> HỦY trích xuất bảng này.")
+        logger.error(f"Bảng '{logical_name}' lỗi cấu hình: thiếu 'strategy' trong YAML -> Hủy trích xuất.")
         return None
 
     strategy = str(strategy).lower().strip()
     if strategy == "cancel":
-        logger.warning(f"[{logical_name}] Chế độ trích xuất là 'CANCEL' -> Hủy trích xuất bảng này.")
+        logger.warning(f"Bảng '{logical_name}' có chế độ trích xuất 'CANCEL' -> Hủy trích xuất.")
         return None
 
     if resolved_columns:
@@ -75,50 +75,50 @@ def build_dynamic_query(
         cutoff_filter = f" AND [{col}] <= '{cutoff}'"
 
     if strategy == "full":
-        logger.info(f"[{logical_name}] Chế độ trích xuất: FULL")
+        logger.info(f"Bảng '{logical_name}' dùng chế độ trích xuất: FULL")
         return base_query
 
     elif strategy == "watermark":
         if not col:
             logger.error(
-                f"[{logical_name}] LỖI WATERMARK: Bảng thiếu cấu hình 'watermark_column'! "
-                f"-> HỦY (CANCEL) trích xuất bảng này để bảo vệ dữ liệu."
+                f"Bảng '{logical_name}' lỗi Watermark: thiếu cấu hình 'watermark_column' "
+                f"-> Hủy trích xuất để bảo vệ dữ liệu."
             )
             return None
 
         mark = last_watermark or rule.get("default_start_watermark")
         if not mark:
             logger.error(
-                f"[{logical_name}] LỖI WATERMARK: Thiếu 'default_start_watermark' và không có 'last_watermark'! "
-                f"-> HỦY (CANCEL) trích xuất bảng này."
+                f"Bảng '{logical_name}' lỗi Watermark: thiếu 'default_start_watermark' và chưa có 'last_watermark' "
+                f"-> Hủy trích xuất."
             )
             return None
 
         op = ">=" if rule.get("resume_in_progress") else ">"
         where_filter = f"[{col}] {op} '{mark}'{cutoff_filter}"
-        logger.info(f"[{logical_name}] Chế độ trích xuất: WATERMARK ({where_filter})")
+        logger.info(f"Bảng '{logical_name}' dùng chế độ trích xuất: WATERMARK ({where_filter})")
 
     elif strategy == "lookback_window":
         if not col:
             logger.error(
-                f"[{logical_name}] LỖI LOOKBACK: Bảng thiếu cấu hình 'watermark_column'! "
-                f"-> HỦY (CANCEL) trích xuất bảng này để bảo vệ dữ liệu."
+                f"Bảng '{logical_name}' lỗi Lookback: thiếu cấu hình 'watermark_column' "
+                f"-> Hủy trích xuất để bảo vệ dữ liệu."
             )
             return None
 
         mark = last_watermark or rule.get("default_start_watermark")
         if not mark:
             logger.error(
-                f"[{logical_name}] LỖI LOOKBACK: Thiếu 'default_start_watermark' và không có 'last_watermark'! "
-                f"-> HỦY (CANCEL) trích xuất bảng này."
+                f"Bảng '{logical_name}' lỗi Lookback: thiếu 'default_start_watermark' và chưa có 'last_watermark' "
+                f"-> Hủy trích xuất."
             )
             return None
 
         days = rule.get("lookback_days")
         if days is None:
             logger.error(
-                f"[{logical_name}] LỖI LOOKBACK: Bảng thiếu cấu hình 'lookback_days'! "
-                f"-> HỦY (CANCEL) trích xuất bảng này."
+                f"Bảng '{logical_name}' lỗi Lookback: thiếu cấu hình 'lookback_days' "
+                f"-> Hủy trích xuất."
             )
             return None
 
@@ -126,11 +126,11 @@ def build_dynamic_query(
             dt = datetime.fromisoformat(str(mark)[:19])
             adjusted_mark = (dt - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
             where_filter = f"[{col}] > '{adjusted_mark}'{cutoff_filter}"
-            logger.info(f"[{logical_name}] Chế độ trích xuất: LOOKBACK ({where_filter})")
+            logger.info(f"Bảng '{logical_name}' dùng chế độ trích xuất: LOOKBACK ({where_filter})")
         except Exception as e:
             logger.error(
-                f"[{logical_name}] LỖI LOOKBACK: Không parse được mốc thời gian '{mark}' ({e})! "
-                f"-> HỦY (CANCEL) trích xuất bảng này."
+                f"Bảng '{logical_name}' lỗi Lookback: không parse được mốc thời gian '{mark}' ({e}) "
+                f"-> Hủy trích xuất."
             )
             return None
 
@@ -139,17 +139,17 @@ def build_dynamic_query(
         end_d = rule.get("end_date")
         if not col or not start_d or not end_d:
             logger.error(
-                f"[{logical_name}] LỖI DATE_RANGE: Thiếu 'watermark_column', 'start_date' hoặc 'end_date'! "
-                f"-> HỦY (CANCEL) trích xuất bảng này."
+                f"Bảng '{logical_name}' lỗi Date Range: thiếu 'watermark_column', 'start_date' hoặc 'end_date' "
+                f"-> Hủy trích xuất."
             )
             return None
         where_filter = f"[{col}] >= '{start_d}' AND [{col}] < '{end_d}'"
-        logger.info(f"[{logical_name}] Chế độ trích xuất: DATE_RANGE ({start_d} -> {end_d})")
+        logger.info(f"Bảng '{logical_name}' dùng chế độ trích xuất: DATE_RANGE ({start_d} -> {end_d})")
 
     else:
         logger.error(
-            f"[{logical_name}] LỖI STRATEGY: Chiến lược '{strategy}' không được hỗ trợ! "
-            f"-> HỦY (CANCEL) trích xuất bảng này."
+            f"Bảng '{logical_name}' lỗi Strategy: chiến lược '{strategy}' không được hỗ trợ "
+            f"-> Hủy trích xuất."
         )
         return None
 
@@ -170,14 +170,14 @@ def extract_table(logical_name, sql_table_name, rule, engine, batch_time, batch_
     start_time = time.time()
     chunksize = rule.get("chunksize")
     if not chunksize:
-        logger.error(f"[{logical_name}] LỖI CẤU HÌNH: Thiếu 'chunksize' trong YAML! -> HỦY trích xuất bảng này.")
+        logger.error(f"Bảng '{logical_name}' lỗi cấu hình: thiếu 'chunksize' trong YAML -> Hủy trích xuất.")
         return
 
     if query_str is None:
         query_str = build_dynamic_query(logical_name, sql_table_name, rule, last_watermark, schema)
 
     if not query_str:
-        logger.warning(f"[EXTRACT SKIP] Đã bỏ qua bảng '{logical_name}' (không trích xuất dữ liệu).")
+        logger.warning(f"Bỏ qua trích xuất bảng '{logical_name}' (không có câu truy vấn).")
         return
 
     query = text(query_str)
@@ -215,19 +215,19 @@ def extract_table(logical_name, sql_table_name, rule, engine, batch_time, batch_
                 chunk["_extracted_at"] = extracted_at_val
                 chunk["_batch_id"] = batch_id
 
-                logger.debug(f"[EXTRACT] Chunk #{chunk_idx} '{logical_name}': {len(chunk):,} dòng")
+                logger.debug(f"Extract chunk #{chunk_idx} '{logical_name}': {len(chunk):,} dòng")
                 yield chunk
                 t0 = time.time()
     except Exception as e:
-        logger.error(f"[LỖI TRÍCH XUẤT] Bảng '{logical_name}' gặp lỗi query: {e}. Rollback bảng này và đánh dấu FAILED!")
+        logger.error(f"Lỗi trích xuất bảng '{logical_name}': {e}. Rollback bảng này và đánh dấu FAILED!")
         raise
 
     speed = (total_rows / extract_duration) if extract_duration > 0 else 0
     logger.info(
-        f"[EXTRACT] Hoàn tất trích xuất '{logical_name:<14}': {total_rows:>7,} dòng, "
+        f"Hoàn tất trích xuất '{logical_name:<14}': {total_rows:>7,} dòng, "
         f"{col_count:>2} cột ({chunk_idx} chunks, {extract_duration:>5.2f}s, {speed:,.0f} dòng/giây)"
         if extract_duration > 0
-        else f"[EXTRACT] Hoàn tất trích xuất '{logical_name:<14}': {total_rows:>7,} dòng"
+        else f"Hoàn tất trích xuất '{logical_name:<14}': {total_rows:>7,} dòng"
     )
 
 
@@ -267,7 +267,7 @@ def extract_from_sqlserver(
             actual_name = resolve_table_name(existing_tables, rule["candidates"])
             if not actual_name:
                 msg = (
-                    f"[THIẾU BẢNG NGUỒN] Không tìm thấy bảng '{logical_name}' trên SQL Server. "
+                    f"Thiếu bảng nguồn: không tìm thấy bảng '{logical_name}' trên SQL Server. "
                     f"Các bảng hiện có: {sorted(existing_tables)} -> Dừng pipeline có kiểm soát."
                 )
                 logger.error(msg)
@@ -296,7 +296,7 @@ def extract_from_sqlserver(
             batch_time=batch_time,
         )
         if not query_str:
-            logger.warning(f"⏩ [BỎ QUA BẢNG] '{logical_name}' bị hủy do lỗi cơ chế/cancel. Tiếp tục các bảng khác...")
+            logger.warning(f"⏩ Bỏ qua bảng '{logical_name}' do bị hủy theo cơ chế/cancel. Tiếp tục các bảng khác...")
             continue
 
         table_stream = extract_table(

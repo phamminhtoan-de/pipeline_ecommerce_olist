@@ -70,7 +70,7 @@ def _process_single_table_worker(
         batch_time=batch_time,
     )
     if not query_str:
-        logger.warning(f"⏩ [BỎ QUA BẢNG] '{logical_name}' bị hủy do lỗi cơ chế/cancel.")
+        logger.warning(f"⏩ Bỏ qua bảng '{logical_name}' do bị hủy theo cơ chế/cancel.")
         return logical_name, None
 
     chunk_stream = extract_table(
@@ -96,13 +96,13 @@ def _process_single_table_worker(
 
 def main():
     if "--preflight" in sys.argv:
-        logger.info("🔍 [PREFLIGHT CHECK] Đang kiểm tra kết nối Source (SQL Server) và Target (PostgreSQL)...")
+        logger.info("🔍 Đang kiểm tra kết nối Source (SQL Server) và Target (PostgreSQL)...")
         try:
             test_connections()
-            logger.info("✅ [PREFLIGHT CHECK] Kết nối Source và Target Database đều sẵn sàng!")
+            logger.info("✅ Kết nối Source và Target Database đều sẵn sàng!")
             return
         except Exception as exc:
-            err_msg = f"💥 [PREFLIGHT CHECK] Lỗi kết nối Database: {exc}"
+            err_msg = f"💥 Lỗi kết nối Database khi preflight check: {exc}"
             logger.error(err_msg)
             send_alert_webhook(err_msg)
             sys.exit(1)
@@ -140,7 +140,7 @@ def main():
         }
         if in_progress_tables:
             logger.warning(
-                f"🔄 [CRASH RECOVERY] Phát hiện bảng chưa hoàn tất ở lần chạy trước: {sorted(in_progress_tables)} "
+                f"🔄 Phát hiện bảng chưa hoàn tất ở lần chạy trước: {sorted(in_progress_tables)} "
                 f"-> Kích hoạt chế độ resume (>= watermark)..."
             )
 
@@ -163,7 +163,7 @@ def main():
                     logical_name, actual_name, rule, chunk_stream, tgt_engine, tgt_schema=target_schema
                 )
         else:
-            logger.info(f"⚡ [CONCURRENT EL] Kích hoạt trích xuất & nạp song song ({ETL_MAX_WORKERS} workers)...")
+            logger.info(f"⚡ Kích hoạt trích xuất & nạp song song ({ETL_MAX_WORKERS} workers)...")
             with ThreadPoolExecutor(max_workers=ETL_MAX_WORKERS) as executor:
                 futures = [
                     executor.submit(
@@ -220,7 +220,7 @@ def main():
     except SchemaValidationError as sve:
         total_elapsed = time.time() - pipeline_start
         err_msg = (
-            f"🛑 [SCHEMA CONTRACT ERROR] PIPELINE DỪNG CÓ KIỂM SOÁT DO THAY ĐỔI CẤU TRÚC NGUỒN KHÔNG HỢP LỆ "
+            f"🛑 Lỗi Schema Contract: pipeline dừng có kiểm soát do thay đổi cấu trúc nguồn không hợp lệ "
             f"(sau {total_elapsed:.2f}s):\n{sve}"
         )
         logger.error(err_msg)
@@ -233,7 +233,7 @@ def main():
         send_alert_webhook(err_msg)
 
         logger.warning(
-            f"💾 [FAULT TOLERANCE] Dữ liệu các chunk đã commit được bảo toàn trong '{target_schema}'. "
+            f"💾 Dữ liệu các chunk đã commit được bảo toàn trong '{target_schema}'. "
             f"Checkpoint được lưu trong metadata, hệ thống sẽ tự động khôi phục ở lần chạy sau!"
         )
         sys.exit(1)

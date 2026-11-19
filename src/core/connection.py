@@ -20,8 +20,8 @@ def retry_on_db_error(max_retries=3, base_delay=2.0):
                         raise
                     wait_sec = base_delay * (2 ** (attempt - 1))
                     logger.warning(
-                        f"⚠️ [DB RETRY {attempt}/{max_retries}] Lỗi kết nối cơ sở dữ liệu tạm thời: {exc}. "
-                        f"Thử lại sau {wait_sec:.1f}s..."
+                        f"⚠️ Thử lại kết nối DB lần {attempt}/{max_retries} do lỗi tạm thời: {exc}. "
+                        f"Chờ {wait_sec:.1f}s..."
                     )
                     time.sleep(wait_sec)
         return wrapper

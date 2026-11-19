@@ -40,7 +40,7 @@ def init_checkpoint_manager(tgt_engine):
     )
     with tgt_engine.begin() as conn:
         conn.execute(create_sql)
-    logger.debug(f"[CHECKPOINT MANAGER] Đã sẵn sàng bảng quản trị '{CHECKPOINT_SCHEMA}.{CHECKPOINT_TABLE}'.")
+    logger.debug(f"Đã sẵn sàng bảng quản trị checkpoint '{CHECKPOINT_SCHEMA}.{CHECKPOINT_TABLE}'.")
 
 
 def get_active_checkpoints(tgt_engine):
@@ -67,7 +67,7 @@ def get_active_checkpoints(tgt_engine):
                     "last_batch_id": m.get("last_batch_id"),
                 }
     except Exception as e:
-        logger.warning(f"[CHECKPOINT MANAGER] Không thể đọc checkpoint từ '{CHECKPOINT_SCHEMA}': {e}")
+        logger.warning(f"Không thể đọc checkpoint từ '{CHECKPOINT_SCHEMA}': {e}")
 
     return checkpoints
 
@@ -181,4 +181,4 @@ def mark_all_checkpoints_completed(tgt_engine, pipeline_stats, batch_id):
                     ),
                     {"batch_id": batch_id, "logical_name": logical_name},
                 )
-    logger.info(f"✅ [CHECKPOINT MANAGER] Đã đánh dấu COMPLETED thành công cho batch '{batch_id}'.")
+    logger.info(f"✅ Đã đánh dấu checkpoint COMPLETED cho batch '{batch_id}'.")
