@@ -1,3 +1,47 @@
+x-airflow-common: &airflow-common
+  build:
+    context: ..
+    dockerfile: airflow/Dockerfile
+  image: olist_airflow:3.1.0-python3.12
+  env_file:
+    - ../.env
+  user: "${AIRFLOW_UID:-50000}:0"
+  environment:
+    &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER:-airflow}:${AIRFLOW_DB_PASSWORD:-airflow}@airflow_metadb:5432/${AIRFLOW_DB_NAME:-airflow}
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-7m5R9kP2vX8qL4wN1zT6yB3cF0hJ9sD2gK5mN8pQ1rU=}
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'false'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__CORE__DEFAULT_TIMEZONE: Asia/Ho_Chi_Minh
+    AIRFLOW__UI__DEFAULT_UI_TIMEZONE: Asia/Ho_Chi_Minh
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:-olist-airflow-jwt-secret-key-2026}
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.api_fastapi.auth.managers.simple.simple_auth_manager.SimpleAuthManager
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: ${AIRFLOW_ADMIN_USER:-admin}:admin
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE: /opt/airflow/simple_auth_passwords.json
+    # Tắt alert ở script Python khi chạy dưới Airflow để tránh gửi trùng khi retry (chỉ giữ callback cấp DAG)
+    ALERT_ON_SCRIPT_ERROR: "false"
+    SRC_DB_TIMEZONE: ${SRC_DB_TIMEZONE:-UTC}
+    # Ghi đè host/driver để các task ETL kết nối thẳng tới container trên elt_network
+    SRC_DB_DRIVER: ODBC Driver 18 for SQL Server
+    SRC_DB_SERVER: sqlserver_oltp
+    SRC_DB_PORT: 1433
+    SRC_DB_TRUSTED_CONNECTION: "no"
+    TGT_DB_HOST: postgres_dwh
+    TGT_DB_PORT: 5432
+    ETL_PROJECT_DIR: /opt/project
+    ETL_PYTHON_BIN: /opt/etl_venv/bin/python
+  volumes:
+    - ../airflow/dags:/opt/airflow/dags
+    - ../airflow/logs:/opt/airflow/logs
+    - ../airflow/plugins:/opt/airflow/plugins
+    - ..:/opt/project
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  networks:
+    - elt_network
+
 services:
   sqlserver_oltp:
     image: mcr.microsoft.com/mssql/server:2022-latest
@@ -27,7 +71,7 @@ services:
     environment:
       POSTGRES_DB: ${TGT_DB_NAME:-olist_dwh}
       POSTGRES_USER: ${TGT_DB_USER:-postgres}
-      POSTGRES_PASSWORD: "${TGT_DB_PASSWORD:?Thieu TGT_DB_PASSWORD - chay bang ./run.sh docker}"
+      POSTGRES_PASSWORD: "${TGT_DB_PASSWORD:?Thieu TGT_DB_PASSWORD trong file .env}"
     ports:
       - "${TGT_DB_PORT:-5432}:5432"
     volumes:
@@ -40,34 +84,102 @@ services:
     networks:
       - elt_network
 
-  etl_pipeline:
-    build:
-      context: ..
-      dockerfile: Docker/Dockerfile 
-    image: olist_etl_app
-    container_name: olist_etl_app
-    depends_on:
-      postgres_dwh:
-        condition: service_healthy
-      sqlserver_oltp:
-        condition: service_healthy
-    env_file:
-      - ../.env
+  airflow_metadb:
+    image: postgres:16
+    container_name: olist_airflow_metadb
+    restart: unless-stopped
     environment:
-      - SRC_DB_SERVER=sqlserver_oltp
-      - SRC_DB_TRUSTED_CONNECTION=no
-      - TGT_DB_HOST=postgres_dwh
-      - TGT_DB_PORT=5432
+      POSTGRES_USER: ${AIRFLOW_DB_USER:-airflow}
+      POSTGRES_PASSWORD: ${AIRFLOW_DB_PASSWORD:-airflow}
+      POSTGRES_DB: ${AIRFLOW_DB_NAME:-airflow}
     volumes:
-      - ../logs:/app/logs
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - airflow_metadb_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
     networks:
       - elt_network
+
+  airflow-init:
+    <<: *airflow-common
+    container_name: olist_airflow_init
+    command:
+      - bash
+      - -c
+      - |
+        mkdir -p /opt/airflow/logs /opt/airflow/dags /opt/airflow/plugins /opt/project/logs
+        airflow db migrate
+    depends_on:
+      airflow_metadb:
+        condition: service_healthy
+    restart: "no"
+
+  airflow-apiserver:
+    <<: *airflow-common
+    container_name: olist_airflow_apiserver
+    command:
+      - bash
+      - -c
+      - |
+        python3 -c 'import json, os; u = os.getenv("AIRFLOW_ADMIN_USER", "admin"); p = os.getenv("AIRFLOW_ADMIN_PASSWORD", "admin"); open("/opt/airflow/simple_auth_passwords.json", "w").write(json.dumps({u: p}))'
+        exec airflow api-server
+    ports:
+      - "${AIRFLOW_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/version"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+    depends_on:
+      airflow_metadb:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: olist_airflow_scheduler
+    command: scheduler
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname \"$${HOSTNAME}\""]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    depends_on:
+      airflow_metadb:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+      airflow-apiserver:
+        condition: service_healthy
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    container_name: olist_airflow_dag_processor
+    command: dag-processor
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type DagProcessorJob --hostname \"$${HOSTNAME}\""]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    depends_on:
+      airflow_metadb:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
 
 volumes:
   postgres_dwh_data:
   sqlserver_data:
+  airflow_metadb_data:
 
 networks:
   elt_network:

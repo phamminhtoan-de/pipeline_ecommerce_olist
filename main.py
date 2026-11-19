@@ -95,6 +95,27 @@ def _process_single_table_worker(
 
 
 def main():
+    if "--preflight" in sys.argv:
+        logger.info("🔍 [PREFLIGHT CHECK] Đang kiểm tra kết nối Source (SQL Server) và Target (PostgreSQL)...")
+        try:
+            test_connections()
+            logger.info("✅ [PREFLIGHT CHECK] Kết nối Source và Target Database đều sẵn sàng!")
+            return
+        except Exception as exc:
+            err_msg = f"💥 [PREFLIGHT CHECK] Lỗi kết nối Database: {exc}"
+            logger.error(err_msg)
+            send_alert_webhook(err_msg)
+            sys.exit(1)
+        finally:
+            try:
+                get_source_engine().dispose()
+            except Exception:
+                pass
+            try:
+                get_target_engine().dispose()
+            except Exception:
+                pass
+
     pipeline_start = time.time()
     batch_time = datetime.now(timezone.utc)
     batch_id = batch_time.strftime("%Y%m%d_%H%M%S")
