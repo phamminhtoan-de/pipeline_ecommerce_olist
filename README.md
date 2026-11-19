@@ -23,7 +23,7 @@ Dự án áp dụng kiến trúc **Medallion (Lakehouse-style)** nhằm giải q
 * **Khử trùng lặp tại tầng Silver dbt (SQL-based Deduplication)**: Chuyển toàn bộ tải tính toán làm sạch, ép kiểu và khử trùng lặp về tầng Silver qua `ROW_NUMBER() OVER (PARTITION BY pk ORDER BY _extracted_at DESC)`. Đảm bảo tính **Idempotency tuyệt đối**.
 * **Unified Gold Star Schema (Kimball)**: Hợp nhất toàn bộ 5 bảng Dimension (bao gồm SCD Type 2 theo dõi khách hàng chuyển địa điểm) và 2 bảng Fact vào một schema duy nhất (`gold`).
 * **Trích xuất đồng thời (Concurrent Extraction)**: Hỗ trợ `ThreadPoolExecutor` nạp song song nhiều bảng, kết hợp cơ chế thử lại có giãn cách tăng dần (exponential backoff retry) do Apache Airflow điều phối.
-* **Unified Logging UTC**: Đồng bộ hóa toàn bộ luồng log giữa Python EL và dbt CLI theo chuẩn giờ UTC (`%Y-%m-%d %H:%M:%S UTC`) được lưu trữ tại `logs/pipeline.log`.
+* **Separated Observability & UTC Logging**: Phân tách rõ log theo từng tầng trong `logs/` — `logs/pipeline.log` cho Extract & Load chuẩn giờ UTC (`%Y-%m-%d %H:%M:%S UTC`), `logs/dbt.log` cho quá trình biến đổi/test dbt, và `logs/airflow/` cho lịch chạy & task của Apache Airflow.
 * **Khung kiểm thử chất lượng 4 tầng (4-Tier Quality Framework)**: Phủ kín từ kiểm tra độ tươi mới (freshness) tầng nguồn, hợp lệ tầng Silver, toàn vẹn khóa tầng Marts đến đối chiếu doanh thu, số lượng đơn hàng tầng Gold.
 
 ---
@@ -32,14 +32,24 @@ Dự án áp dụng kiến trúc **Medallion (Lakehouse-style)** nhằm giải q
 
 ```mermaid
 flowchart TD
-    subgraph S1["1. Upstream OLTP Layer"]
-        SS["SQL Server (OLTP Database)<br/>100,000+ Records"]
+    subgraph S0["0. Orchestration Layer (Apache Airflow 3.1 - LocalExecutor)"]
+        direction LR
+        AF_PF["1. preflight_check<br/>(--preflight, retries=3)"] --> AF_EL["2. extract_load_bronze<br/>(main.py, retries=2)"]
+        AF_EL --> AF_SLV["3. dbt_silver<br/>(merge + unique index)"]
+        AF_SLV --> AF_TS["4. dbt_test_silver<br/>(Quality Gate 1)"]
+        AF_TS --> AF_SNP["5. dbt_snapshot<br/>(snp_sellers SCD2)"]
+        AF_SNP --> AF_GLD["6. dbt_gold<br/>(Star Schema)"]
+        AF_GLD --> AF_TG["7. dbt_test_gold<br/>(Quality Gate 2)"]
     end
 
-    subgraph S2["2. Ingestion & Quality Guard (Python Engine)"]
+    subgraph S1["1. Upstream OLTP Layer (Windows Host)"]
+        SS["SQL Server 2022 (E_commerce)<br/>READ COMMITTED • SRC_DB_TIMEZONE"]
+    end
+
+    subgraph S2["2. Ingestion & Quality Guard (/opt/etl_venv)"]
         direction TB
         BC["Pre-flight Baseline & Schema Contract<br/>(contract.py)"]
-        INIT["Bootstrap Schema DDL<br/>(init_schema.py)"]
+        INIT["Bootstrap DDL & Checkpoint Init<br/>(init_schema.py, state_manager.py)"]
         EX["Concurrent Chunked Streamer<br/>(extract.py + ThreadPoolExecutor)"]
         EVO["Target Dynamic Schema Evolution<br/>(evolution.py)"]
         SS --> BC
@@ -48,9 +58,9 @@ flowchart TD
         EX --> EVO
     end
 
-    subgraph S3["3. PostgreSQL Bronze Layer (schema: bronze)"]
+    subgraph S3["3. PostgreSQL Bronze Layer (schema: bronze, etl_metadata)"]
         direction TB
-        BRZ["Immutable Bronze Raw Store (Append-Only)<br/>(schema: bronze)"]
+        BRZ["Bronze Store<br/>orders (lookback 60d), reviews (lookback 3d)<br/>&amp; 5 bảng full reload"]
         CKP["In-Transaction ACID Checkpointing<br/>(etl_metadata._pipeline_checkpoints)"]
         AUD["2-Tier Row Count Baseline Audit<br/>(validate_target.py)"]
         EVO --> BRZ
@@ -59,22 +69,24 @@ flowchart TD
     end
 
     subgraph S4["4. dbt Silver Layer (schema: silver)"]
-        STG["Cleaned & Deduped Models<br/>(ROW_NUMBER Deduplication, Cast, Trim)"]
+        STG["Cleaned &amp; Deduped Models<br/>(ROW_NUMBER + incremental merge)"]
         AUD -->|"dbt run --select staging"| STG
     end
 
     subgraph S5["5. dbt Gold Layer (schema: gold)"]
-        GOLD["Kimball Unified Star Schema Marts<br/>5 Dims (dim_customer SCD2) + 2 Facts"]
+        GOLD["Kimball Unified Star Schema Marts<br/>5 Dims (dim_customer/dim_seller SCD2) + 2 Facts"]
         TST["Multi-Tier Automated Test Guard<br/>(dbt test -> test_failures schema)"]
         STG -->|"dbt run --select marts"| GOLD
         STG -.->|"dbt test"| TST
         GOLD -.->|"dbt test"| TST
     end
 
-    subgraph S6["6. Business Intelligence & Reporting"]
-        BI["Dashboards & Self-Service BI<br/>PowerBI / Metabase / Tableau"]
+    subgraph S6["6. Business Intelligence &amp; Reporting"]
+        BI["Dashboards &amp; Self-Service BI<br/>PowerBI / Metabase / Tableau"]
         GOLD --> BI
     end
+
+    S0 -.->|"Điều phối qua host.docker.internal"| S2
 ```
 
 ### Các bước vận hành chi tiết:
@@ -106,7 +118,6 @@ flowchart TD
 etl_ecommerce_data/
 ├── .env                              # Thông tin cấu hình môi trường & kết nối CSDL
 ├── .env.example                      # Template mẫu cho cấu hình môi trường
-├── .gitattributes                    # Chuẩn hóa ký tự xuống dòng LF
 ├── .gitignore                        # Danh sách loại trừ khỏi git (venv, logs, credentials)
 ├── requirements.txt                  # Danh mục thư viện Python
 ├── docker-compose.yml                # Điều phối cụm Apache Airflow 3.1 (kết nối DB nguồn/đích qua host.docker.internal)
@@ -118,11 +129,11 @@ etl_ecommerce_data/
 │       └── olist_medallion_elt.py    # DAG điều phối 7 bước: Preflight -> Bronze -> Silver -> Snapshot -> Gold
 │
 ├── logs/
-│   ├── pipeline.log                  # File log duy nhất của pipeline (ghi giờ chuẩn UTC, xoay vòng 10MB)
+│   ├── pipeline.log                  # Log tiến trình Extract & Load Python (chuẩn UTC, xoay vòng 10MB)
+│   ├── dbt.log                       # Log biên dịch SQL & kiểm định chất lượng của dbt
 │   └── airflow/                      # Log chi tiết các task & DAG processor của Apache Airflow
 │
 ├── docs/
-│   ├── README.md                     # Tài liệu kỹ thuật chi tiết của dự án
 │   ├── olap_olist.drawio             # Sơ đồ kiến trúc Star Schema (OLAP)
 │   └── oltp_olist.drawio             # Sơ đồ cơ sở dữ liệu giao dịch nguồn (OLTP)
 │
