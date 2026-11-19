@@ -32,14 +32,15 @@ Dự án áp dụng kiến trúc **Medallion (Lakehouse-style)** nhằm giải q
 
 ```mermaid
 flowchart TD
-    subgraph S0["0. Orchestration Layer (Apache Airflow 3.1 - LocalExecutor)"]
+    subgraph S0["0. Orchestration Layer (Apache Airflow 3.1 - LocalExecutor & TaskGroups)"]
         direction LR
-        AF_PF["1. preflight_check<br/>(--preflight, retries=3)"] --> AF_EL["2. extract_load_bronze<br/>(main.py, retries=2)"]
-        AF_EL --> AF_SLV["3. dbt_silver<br/>(merge + unique index)"]
-        AF_SLV --> AF_TS["4. dbt_test_silver<br/>(Quality Gate 1)"]
-        AF_TS --> AF_SNP["5. dbt_snapshot<br/>(snp_sellers SCD2)"]
-        AF_SNP --> AF_GLD["6. dbt_gold<br/>(Star Schema)"]
-        AF_GLD --> AF_TG["7. dbt_test_gold<br/>(Quality Gate 2)"]
+        AF_PF["1. preflight_check<br/>(--preflight --init-schema)"] --> AF_EL["2. TaskGroup: extract_load_bronze<br/>(7 parallel bronze_&lt;table&gt; tasks)"]
+        AF_EL --> AF_DP["3. dbt_deps"]
+        AF_DP --> AF_SLV["4. TaskGroup: dbt_silver<br/>(7 parallel silver_&lt;model&gt; tasks)"]
+        AF_SLV --> AF_TS["5. dbt_test_silver<br/>(Quality Gate 1)"]
+        AF_TS --> AF_SNP["6. dbt_snapshot<br/>(snp_sellers SCD2)"]
+        AF_SNP --> AF_GLD["7. TaskGroup: dbt_gold<br/>(Dim -> Fact Star Schema)"]
+        AF_GLD --> AF_TG["8. dbt_test_gold<br/>(Quality Gate 2)"]
     end
 
     subgraph S1["1. Upstream OLTP Layer (Windows Host)"]
@@ -121,12 +122,12 @@ etl_ecommerce_data/
 ├── .gitignore                        # Danh sách loại trừ khỏi git (venv, logs, credentials)
 ├── requirements.txt                  # Danh mục thư viện Python
 ├── docker-compose.yml                # Điều phối cụm Apache Airflow 3.1 (kết nối DB nguồn/đích qua host.docker.internal)
-├── main.py                           # Entrypoint kiểm tra kết nối (--preflight) & nạp tầng Bronze (EL)
+├── main.py                           # Entrypoint kiểm tra (--preflight --init-schema) & nạp Bronze (toàn bộ hoặc --table)
 │
 ├── airflow/                          # Bộ điều phối Apache Airflow 3.1 (LocalExecutor)
 │   ├── Dockerfile                    # Image Airflow 3.1 + ODBC Driver 18 + /opt/etl_venv độc lập
 │   └── dags/
-│       └── olist_medallion_elt.py    # DAG điều phối 7 bước: Preflight -> Bronze -> Silver -> Snapshot -> Gold
+│       └── olist_medallion_elt.py    # DAG TaskGroup chi tiết theo bảng/model: Preflight -> 7 Bronze -> dbt Silver/Gold -> Test
 │
 ├── logs/
 │   ├── pipeline.log                  # Log tiến trình Extract & Load Python (chuẩn UTC, xoay vòng 10MB)
@@ -167,11 +168,12 @@ etl_ecommerce_data/
 │       ├── validate_source.py        # Đo lường số dòng và schema baseline của nguồn
 │       └── validate_target.py        # Kiểm toán số dòng Bronze đối chiếu với baseline nguồn
 │
-├── tests/                            # Bộ kiểm thử đơn vị Python (Unit Test Suite)
+├── tests/                            # Bộ kiểm thử đơn vị & tích hợp Python (Unit + Live Postgres)
 │   ├── test_schema_contract.py       # Test Schema Contract & kiểu dữ liệu Evolution
 │   ├── test_extract_query.py         # Test sinh SQL động (Watermark, Resume, Timezone)
 │   ├── test_state_and_alert.py       # Test cấu hình Checkpoint & Webhook Alert guard
-│   └── test_airflow_orchestration.py # Test cấu trúc DAG Airflow & cờ --preflight
+│   ├── test_airflow_orchestration.py # Test DAG TaskGroup, cờ --preflight/--init-schema & --table
+│   └── test_integration_pipeline.py  # Test End-to-End Crash/Resume & live Postgres ACID/Schema Evolution
 │
 └── dbt_transform/                    # Dự án dbt Core mô hình hóa dữ liệu (Silver & Gold)
     ├── dbt_project.yml               # Cấu hình dự án dbt, chỉ định schema silver và gold
@@ -290,11 +292,12 @@ docker compose down
 #### Lựa chọn 2: Chạy thủ công / Debug cục bộ trên Python (Windows PowerShell)
 
 ```powershell
-# 1. Kiểm tra kết nối Source & Target Database (Preflight check):
-.\.venv\Scripts\python.exe main.py --preflight
+# 1. Kiểm tra kết nối Source & Target Database (Preflight check + khởi tạo schema nếu cần):
+.\.venv\Scripts\python.exe main.py --preflight --init-schema
 
-# 2. Chạy nạp dữ liệu tầng Bronze (Append-Only mode):
+# 2. Chạy nạp dữ liệu tầng Bronze (Append-Only mode) — toàn bộ hoặc riêng từng bảng:
 .\.venv\Scripts\python.exe main.py
+.\.venv\Scripts\python.exe main.py --table orders
 
 # 3. Chạy ở chế độ tuần tự (Sequential mode - dành cho máy cấu hình thấp):
 .\.venv\Scripts\python.exe main.py --sequential
@@ -324,11 +327,10 @@ Dự án thiết lập hệ thống kiểm định chất lượng dữ liệu �
 | **3. Fact / Dimension** | `PK`, `FK`, `relationships` | **Kiểm tra tính toàn vẹn mô hình:**<br>• Ràng buộc khóa ngoại: 100% bản ghi Fact phải tham chiếu đúng Dimension tồn tại, không có đơn hàng mồ côi.<br>• Kiểm tra tính duy nhất của Surrogate Keys. | [dbt_transform/models/marts/schema.yml](file:///d:/code/personal_project/etl_ecommerce_data/dbt_transform/models/marts/schema.yml) |
 | **4. Gold** | `Tổng doanh thu`, `Số lượng`, `Quy tắc nghiệp vụ` | **Đảm bảo dữ liệu phân tích chính xác tuyệt đối:**<br>• Đối chiếu doanh thu: Tổng tiền trên `fact_orders` khớp với tổng các dòng hàng trên `fact_sales`.<br>• Đối chiếu số lượng: Số mặt hàng trên `fact_orders` khớp 100% số dòng hàng thực tế trên `fact_sales`.<br>• Kiểm tra logic ngày: Ngày giao hàng phải sau ngày đặt hàng. | [dbt_transform/tests/](file:///d:/code/personal_project/etl_ecommerce_data/dbt_transform/tests/) |
 
-### 5.2. Chạy Kiểm thử Đơn vị Python (Unit Test Suite)
-Kiểm tra tính hợp lệ của hợp đồng Schema, câu truy vấn trích xuất động và cấu hình Checkpoint:
+### 5.2. Chạy Kiểm thử Đơn vị & Tích hợp Python (Unit + Live Postgres Tests)
+Kiểm tra Schema Contract, Dynamic SQL, cấu trúc DAG `TaskGroup`, luồng Crash Recovery / Resume và ACID checkpointing + Schema Evolution trực tiếp trên PostgreSQL (cũng chạy tự động kèm PostgreSQL 16 service container trên GitHub Actions CI):
 ```powershell
-.\.venv\Scripts\python.exe -m unittest discover tests
-# Ran 7 tests in 0.002s -> OK (100% Passed)
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
 ### 5.3. Chạy Kiểm thử Chất lượng Dữ liệu dbt
