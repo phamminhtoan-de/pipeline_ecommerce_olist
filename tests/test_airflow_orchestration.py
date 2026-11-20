@@ -8,38 +8,61 @@ from unittest.mock import patch
 
 class TestAirflowOrchestration(unittest.TestCase):
     def test_airflow_dag_ast_structure_and_tasks(self):
-        dag_path = Path(__file__).resolve().parents[1] / "airflow" / "dags" / "olist_medallion_elt.py"
-        source = dag_path.read_text(encoding="utf-8")
-        tree = ast.parse(source, filename=str(dag_path))
+        dags_dir = Path(__file__).resolve().parents[1] / "airflow" / "dags"
+        dag_path = dags_dir / "olist_medallion_elt.py"
+        tasks_dir = dags_dir / "olist_tasks"
+        airflowignore_path = dags_dir / ".airflowignore"
+
+        self.assertTrue(airflowignore_path.exists(), "Thiếu .airflowignore để bỏ qua olist_tasks/")
+        self.assertIn("olist_tasks/", airflowignore_path.read_text(encoding="utf-8"))
+
+        module_paths = [
+            dag_path,
+            tasks_dir / "config.py",
+            tasks_dir / "callbacks.py",
+            tasks_dir / "bronze_stage.py",
+            tasks_dir / "silver_stage.py",
+            tasks_dir / "gold_stage.py",
+        ]
+        sources = [p.read_text(encoding="utf-8") for p in module_paths]
+        combined_source = "\n".join(sources)
+        combined_compact = " ".join(combined_source.split())
 
         dag_call = None
         task_ids = []
         group_ids = []
         constants = {}
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
-                name = node.targets[0].id
-                if name in {
-                    "BRONZE_TABLES",
-                    "SILVER_MODELS",
-                    "GOLD_DIM_BASE_MODELS",
-                    "GOLD_DIM_DEPENDENT_MODELS",
-                    "GOLD_FACT_MODELS",
-                    "GOLD_BUSINESS_RULES",
-                }:
-                    constants[name] = ast.literal_eval(node.value)
-            elif isinstance(node, ast.Call):
-                func_name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
-                if func_name == "DAG":
-                    dag_call = node
-                elif func_name == "BashOperator":
-                    for kw in node.keywords:
-                        if kw.arg == "task_id" and isinstance(kw.value, ast.Constant):
-                            task_ids.append(kw.value.value)
-                elif func_name == "TaskGroup":
-                    for kw in node.keywords:
-                        if kw.arg == "group_id" and isinstance(kw.value, ast.Constant):
-                            group_ids.append(kw.value.value)
+        for mod_path, mod_src in zip(module_paths, sources):
+            tree = ast.parse(mod_src, filename=str(mod_path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.RShift, ast.LShift)):
+                    self.assertFalse(
+                        isinstance(node.left, ast.List) and isinstance(node.right, ast.List),
+                        f"Không được nối trực tiếp list >> list trong {mod_path.name}",
+                    )
+                elif isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+                    name = node.targets[0].id
+                    if name in {
+                        "BRONZE_TABLES",
+                        "SILVER_MODELS",
+                        "GOLD_DIM_BASE_MODELS",
+                        "GOLD_DIM_DEPENDENT_MODELS",
+                        "GOLD_FACT_MODELS",
+                        "GOLD_BUSINESS_RULES",
+                    }:
+                        constants[name] = ast.literal_eval(node.value)
+                elif isinstance(node, ast.Call):
+                    func_name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+                    if func_name == "DAG":
+                        dag_call = node
+                    elif func_name == "BashOperator":
+                        for kw in node.keywords:
+                            if kw.arg == "task_id" and isinstance(kw.value, ast.Constant):
+                                task_ids.append(kw.value.value)
+                    elif func_name == "TaskGroup":
+                        for kw in node.keywords:
+                            if kw.arg == "group_id" and isinstance(kw.value, ast.Constant):
+                                group_ids.append(kw.value.value)
 
         self.assertIsNotNone(dag_call, "Không tìm thấy khai báo DAG trong olist_medallion_elt.py")
         dag_kwargs = {
@@ -63,12 +86,12 @@ class TestAirflowOrchestration(unittest.TestCase):
                 "check_source_sqlserver",
                 "check_target_postgres",
                 "init_bronze_schema",
-                "dbt_deps",
                 "validate_bronze",
                 "dbt_test_bronze_source",
                 "dbt_source_freshness",
                 "collect_bronze_errors",
                 "bronze_quality_gate",
+                "dbt_deps",
                 "dbt_test_silver",
                 "collect_silver_errors",
                 "silver_quality_gate",
@@ -99,26 +122,19 @@ class TestAirflowOrchestration(unittest.TestCase):
         self.assertEqual(constants.get("GOLD_FACT_MODELS"), ["fact_orders", "fact_sales"])
         self.assertEqual(len(constants.get("GOLD_BUSINESS_RULES", [])), 6)
 
-        for node in ast.walk(tree):
-            if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.RShift, ast.LShift)):
-                self.assertFalse(
-                    isinstance(node.left, ast.List) and isinstance(node.right, ast.List),
-                    "Không được nối trực tiếp list >> list trong Airflow DAG",
-                )
-
-        compact_source = " ".join(source.split())
         for dep_edge in (
             "check_target_postgres >> init_bronze_schema",
             "[check_source_sqlserver, init_bronze_schema] >> extract_load_bronze",
             "extract_load_bronze >> [validate_bronze, dbt_test_bronze_source, dbt_source_freshness]",
-            "dbt_deps >> [dbt_test_bronze_source, dbt_source_freshness]",
             "dbt_test_bronze_source >> collect_bronze_errors >> bronze_quality_gate",
-            "[validate_bronze, bronze_quality_gate] >> dbt_silver",
-            "dbt_silver >> dbt_test_silver >> collect_silver_errors >> silver_quality_gate >> dbt_snapshot >> dbt_gold",
+            "dbt_silver >> dbt_test_silver >> collect_silver_errors >> silver_quality_gate >> dbt_snapshot",
             "dbt_gold >> [dbt_test_gold_schema, dbt_test_business_rules]",
             "[dbt_test_gold_schema, dbt_test_business_rules] >> collect_gold_errors >> gold_quality_gate",
+            'silver["dbt_deps"] >> [bronze["dbt_test_bronze_source"], bronze["dbt_source_freshness"]]',
+            '[bronze["validate_bronze"], bronze["bronze_quality_gate"]] >> silver["dbt_silver"]',
+            'silver["dbt_snapshot"] >> gold["dbt_gold"]',
         ):
-            self.assertIn(dep_edge, compact_source)
+            self.assertIn(dep_edge, combined_compact)
 
         for expected_flag in (
             "--preflight-source",
@@ -140,16 +156,16 @@ class TestAirflowOrchestration(unittest.TestCase):
             "--collect --layer gold",
             "--quality-gate --layer gold",
         ):
-            self.assertIn(expected_flag, source)
+            self.assertIn(expected_flag, combined_source)
 
-        self.assertEqual(source.count('trigger_rule="all_done"'), 3)
+        self.assertEqual(combined_source.count('trigger_rule="all_done"'), 3)
 
-        self.assertIn('gold_tasks["dim_location"] >> [gold_tasks["dim_customer"], gold_tasks["dim_seller"]]', compact_source)
-        self.assertIn('>> gold_tasks["fact_orders"]', compact_source)
-        self.assertIn('>> gold_tasks["fact_sales"]', compact_source)
-        self.assertIn("dbt.cli.main", source)
-        self.assertNotIn("src.transformation.dbt_runner", source)
-        self.assertIn("retry_exponential_backoff=True", source)
+        self.assertIn('gold_tasks["dim_location"] >> [gold_tasks["dim_customer"], gold_tasks["dim_seller"]]', combined_compact)
+        self.assertIn('>> gold_tasks["fact_orders"]', combined_compact)
+        self.assertIn('>> gold_tasks["fact_sales"]', combined_compact)
+        self.assertIn("dbt.cli.main", combined_source)
+        self.assertNotIn("src.transformation.dbt_runner", combined_source)
+        self.assertIn("retry_exponential_backoff=True", combined_source)
 
     def test_connection_delegates_retry_to_airflow(self):
         import src.core.connection as conn_mod
