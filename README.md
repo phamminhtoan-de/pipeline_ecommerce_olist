@@ -109,7 +109,10 @@ etl_ecommerce_data/
 │
 ├── airflow/
 │   ├── Dockerfile                    # Image Airflow 3.1 + ODBC Driver 18 + /opt/etl_venv
-│   └── dags/olist_medallion_elt.py   # DAG điều phối chi tiết gồm 4 TaskGroup & 10 standalone tasks
+│   └── dags/
+│       ├── .airflowignore            # Bỏ qua thư mục helper olist_tasks/ khi scan DAG
+│       ├── olist_medallion_elt.py    # Khung DAG chính nối 3 tầng Bronze -> Silver -> Gold
+│       └── olist_tasks/              # Các module tách theo tầng (config, callbacks, bronze/silver/gold_stage)
 │
 ├── docs/
 │   ├── olap_olist.drawio             # Sơ đồ Star Schema tầng Gold (OLAP)
