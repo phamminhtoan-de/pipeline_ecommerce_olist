@@ -19,6 +19,7 @@ from src.core.connection import (
 from src.core.logger import get_logger
 from src.ingestion.extract import build_dynamic_query, extract_from_sqlserver, extract_table
 from src.ingestion.load import load_single_table
+from src.monitoring.collect_errors import init_monitoring_schema
 from src.schema.contract import SchemaValidationError
 from src.schema.init_schema import init_bronze_schema
 from src.state.history import save_pipeline_run_history
@@ -231,6 +232,7 @@ def main():
                 tgt_engine = get_target_engine()
                 init_bronze_schema(tgt_engine, target_schema=TGT_DB_SCHEMA)
                 init_checkpoint_manager(tgt_engine)
+                init_monitoring_schema(tgt_engine)
                 get_watermark_states(tgt_engine, tgt_schema=TGT_DB_SCHEMA)
             logger.info("Kết nối Source và Target Database đều sẵn sàng!")
             return
@@ -290,6 +292,7 @@ def main():
             tgt_engine = get_target_engine()
             init_bronze_schema(tgt_engine, target_schema=TGT_DB_SCHEMA)
             init_checkpoint_manager(tgt_engine)
+            init_monitoring_schema(tgt_engine)
             get_watermark_states(tgt_engine, tgt_schema=TGT_DB_SCHEMA)
             logger.info("Khởi tạo schema Bronze và metadata hoàn tất!")
             return

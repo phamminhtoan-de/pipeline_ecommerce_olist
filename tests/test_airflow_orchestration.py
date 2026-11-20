@@ -67,9 +67,15 @@ class TestAirflowOrchestration(unittest.TestCase):
                 "validate_bronze",
                 "dbt_test_bronze_source",
                 "dbt_source_freshness",
+                "collect_bronze_errors",
+                "bronze_quality_gate",
                 "dbt_test_silver",
+                "collect_silver_errors",
+                "silver_quality_gate",
                 "dbt_snapshot",
                 "dbt_test_gold_schema",
+                "collect_gold_errors",
+                "gold_quality_gate",
             ],
         )
         self.assertEqual(
@@ -106,9 +112,11 @@ class TestAirflowOrchestration(unittest.TestCase):
             "[check_source_sqlserver, init_bronze_schema] >> extract_load_bronze",
             "extract_load_bronze >> [validate_bronze, dbt_test_bronze_source, dbt_source_freshness]",
             "dbt_deps >> [dbt_test_bronze_source, dbt_source_freshness]",
-            "[validate_bronze, dbt_test_bronze_source] >> dbt_silver",
-            "dbt_silver >> dbt_test_silver >> dbt_snapshot >> dbt_gold",
+            "dbt_test_bronze_source >> collect_bronze_errors >> bronze_quality_gate",
+            "[validate_bronze, bronze_quality_gate] >> dbt_silver",
+            "dbt_silver >> dbt_test_silver >> collect_silver_errors >> silver_quality_gate >> dbt_snapshot >> dbt_gold",
             "dbt_gold >> [dbt_test_gold_schema, dbt_test_business_rules]",
+            "[dbt_test_gold_schema, dbt_test_business_rules] >> collect_gold_errors >> gold_quality_gate",
         ):
             self.assertIn(dep_edge, compact_source)
 
@@ -124,8 +132,17 @@ class TestAirflowOrchestration(unittest.TestCase):
             "--select staging --exclude source:* --target-path /tmp/dbt_test_silver",
             "--select marts,test_type:generic --target-path /tmp/dbt_test_gold_schema",
             "--select {rule_name} --target-path /tmp/dbt_test_{rule_name}",
+            "src.monitoring.collect_errors",
+            "--collect --layer bronze",
+            "--quality-gate --layer bronze",
+            "--collect --layer silver",
+            "--quality-gate --layer silver",
+            "--collect --layer gold",
+            "--quality-gate --layer gold",
         ):
             self.assertIn(expected_flag, source)
+
+        self.assertEqual(source.count('trigger_rule="all_done"'), 3)
 
         self.assertIn('gold_tasks["dim_location"] >> [gold_tasks["dim_customer"], gold_tasks["dim_seller"]]', compact_source)
         self.assertIn('>> gold_tasks["fact_orders"]', compact_source)
@@ -189,6 +206,7 @@ class TestAirflowOrchestration(unittest.TestCase):
              patch.object(main, "test_connections") as mock_test_conn, \
              patch.object(main, "init_bronze_schema") as mock_init_schema, \
              patch.object(main, "init_checkpoint_manager") as mock_init_ckpt, \
+             patch.object(main, "init_monitoring_schema") as mock_init_mon, \
              patch.object(main, "get_watermark_states") as mock_get_wm, \
              patch.object(main, "get_source_engine") as mock_src_engine, \
              patch.object(main, "get_target_engine") as mock_tgt_engine:
@@ -197,6 +215,7 @@ class TestAirflowOrchestration(unittest.TestCase):
         mock_test_conn.assert_called_once()
         mock_init_schema.assert_called_once()
         mock_init_ckpt.assert_called_once()
+        mock_init_mon.assert_called_once()
         mock_get_wm.assert_called_once()
         mock_src_engine.return_value.dispose.assert_called_once()
         mock_tgt_engine.return_value.dispose.assert_called_once()
@@ -254,6 +273,7 @@ class TestAirflowOrchestration(unittest.TestCase):
              patch.object(main, "test_connections") as mock_test_conn, \
              patch.object(main, "init_bronze_schema") as mock_init_schema, \
              patch.object(main, "init_checkpoint_manager") as mock_init_ckpt, \
+             patch.object(main, "init_monitoring_schema") as mock_init_mon, \
              patch.object(main, "get_watermark_states") as mock_get_wm, \
              patch.object(main, "get_target_engine") as mock_tgt_engine:
             main.main()
@@ -261,6 +281,7 @@ class TestAirflowOrchestration(unittest.TestCase):
         mock_test_conn.assert_not_called()
         mock_init_schema.assert_called_once()
         mock_init_ckpt.assert_called_once()
+        mock_init_mon.assert_called_once()
         mock_get_wm.assert_called_once()
         mock_tgt_engine.return_value.dispose.assert_called_once()
 

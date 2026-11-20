@@ -56,6 +56,7 @@ GOLD_BUSINESS_RULES = [
     "assert_sales_amounts_positive",
     "assert_valid_review_score",
 ]
+GOLD_RULE_TARGET_DIRS = " ".join(f"/tmp/dbt_test_{rule_name}" for rule_name in GOLD_BUSINESS_RULES)
 
 
 def on_task_failure_alert(context):
@@ -192,6 +193,28 @@ with DAG(
         retries=0,
     )
 
+    collect_bronze_errors = BashOperator(
+        task_id="collect_bronze_errors",
+        bash_command=(
+            f'{ETL_PYTHON} -m src.monitoring.collect_errors '
+            '--collect --layer bronze --run-id "{{ run_id }}" --target-dir /tmp/dbt_test_bronze_source'
+        ),
+        cwd=PROJECT_DIR,
+        trigger_rule="all_done",
+        retries=1,
+        retry_delay=timedelta(seconds=15),
+    )
+
+    bronze_quality_gate = BashOperator(
+        task_id="bronze_quality_gate",
+        bash_command=(
+            f'{ETL_PYTHON} -m src.monitoring.collect_errors '
+            '--quality-gate --layer bronze --run-id "{{ run_id }}" --target-dir /tmp/dbt_test_bronze_source'
+        ),
+        cwd=PROJECT_DIR,
+        retries=0,
+    )
+
     with TaskGroup(
         group_id="dbt_silver",
         tooltip="Làm sạch, chuẩn hóa & dedup song song 7 model tầng Silver",
@@ -212,6 +235,28 @@ with DAG(
         task_id="dbt_test_silver",
         bash_command=f"{DBT_CLI} test --select staging --exclude source:* --target-path /tmp/dbt_test_silver",
         cwd=DBT_PROJECT_DIR,
+        retries=0,
+    )
+
+    collect_silver_errors = BashOperator(
+        task_id="collect_silver_errors",
+        bash_command=(
+            f'{ETL_PYTHON} -m src.monitoring.collect_errors '
+            '--collect --layer silver --run-id "{{ run_id }}" --target-dir /tmp/dbt_test_silver'
+        ),
+        cwd=PROJECT_DIR,
+        trigger_rule="all_done",
+        retries=1,
+        retry_delay=timedelta(seconds=15),
+    )
+
+    silver_quality_gate = BashOperator(
+        task_id="silver_quality_gate",
+        bash_command=(
+            f'{ETL_PYTHON} -m src.monitoring.collect_errors '
+            '--quality-gate --layer silver --run-id "{{ run_id }}" --target-dir /tmp/dbt_test_silver'
+        ),
+        cwd=PROJECT_DIR,
         retries=0,
     )
 
@@ -273,10 +318,36 @@ with DAG(
                 retries=0,
             )
 
+    collect_gold_errors = BashOperator(
+        task_id="collect_gold_errors",
+        bash_command=(
+            f'{ETL_PYTHON} -m src.monitoring.collect_errors '
+            f'--collect --layer gold --run-id "{{{{ run_id }}}}" '
+            f'--target-dir /tmp/dbt_test_gold_schema {GOLD_RULE_TARGET_DIRS}'
+        ),
+        cwd=PROJECT_DIR,
+        trigger_rule="all_done",
+        retries=1,
+        retry_delay=timedelta(seconds=15),
+    )
+
+    gold_quality_gate = BashOperator(
+        task_id="gold_quality_gate",
+        bash_command=(
+            f'{ETL_PYTHON} -m src.monitoring.collect_errors '
+            f'--quality-gate --layer gold --run-id "{{{{ run_id }}}}" '
+            f'--target-dir /tmp/dbt_test_gold_schema {GOLD_RULE_TARGET_DIRS}'
+        ),
+        cwd=PROJECT_DIR,
+        retries=0,
+    )
+
     check_target_postgres >> init_bronze_schema
     [check_source_sqlserver, init_bronze_schema] >> extract_load_bronze
     extract_load_bronze >> [validate_bronze, dbt_test_bronze_source, dbt_source_freshness]
     dbt_deps >> [dbt_test_bronze_source, dbt_source_freshness]
-    [validate_bronze, dbt_test_bronze_source] >> dbt_silver
-    dbt_silver >> dbt_test_silver >> dbt_snapshot >> dbt_gold
+    dbt_test_bronze_source >> collect_bronze_errors >> bronze_quality_gate
+    [validate_bronze, bronze_quality_gate] >> dbt_silver
+    dbt_silver >> dbt_test_silver >> collect_silver_errors >> silver_quality_gate >> dbt_snapshot >> dbt_gold
     dbt_gold >> [dbt_test_gold_schema, dbt_test_business_rules]
+    [dbt_test_gold_schema, dbt_test_business_rules] >> collect_gold_errors >> gold_quality_gate

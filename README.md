@@ -46,13 +46,18 @@ flowchart TD
         AF_EL --> AF_FR["4c. dbt_source_freshness<br/>(24h warn / 48h error)"]
         AF_DP["2b. dbt_deps"] --> AF_TB
         AF_DP --> AF_FR
+        AF_TB --> AF_CB["4d. collect_bronze_errors<br/>(all_done -> monitoring.error_records)"] --> AF_BG["4e. bronze_quality_gate"]
         AF_VAL --> AF_SLV["5. TaskGroup: dbt_silver<br/>(7 parallel silver_&lt;model&gt; tasks)"]
-        AF_TB --> AF_SLV
+        AF_BG --> AF_SLV
         AF_SLV --> AF_TS["6. dbt_test_silver<br/>(staging --exclude source:*)"]
-        AF_TS --> AF_SNP["7. dbt_snapshot<br/>(snp_sellers SCD2)"]
+        AF_TS --> AF_CS["6b. collect_silver_errors (all_done)"] --> AF_SG["6c. silver_quality_gate"]
+        AF_SG --> AF_SNP["7. dbt_snapshot<br/>(snp_sellers SCD2)"]
         AF_SNP --> AF_GLD["8. TaskGroup: dbt_gold<br/>(Dim -> Fact Star Schema)"]
         AF_GLD --> AF_TGS["9a. dbt_test_gold_schema<br/>(marts,test_type:generic)"]
         AF_GLD --> AF_TBR["9b. TaskGroup: dbt_test_business_rules<br/>(6 rule_assert_* tasks)"]
+        AF_TGS --> AF_CG["9c. collect_gold_errors (all_done)"]
+        AF_TBR --> AF_CG
+        AF_CG --> AF_GG["9d. gold_quality_gate"]
     end
 
     subgraph S1["1. Upstream OLTP Layer (Windows Host)"]
@@ -122,6 +127,7 @@ etl_ecommerce_data/
 │   ├── ingestion/                    # extract.py (dynamic query + chunk generator), load.py (COPY + ACID chunk commit)
 │   ├── state/                        # state_manager.py (checkpoints), watermark.py (_etl_watermarks), history.py
 │   ├── schema/                       # contract.py (bảo vệ PK), evolution.py (ADD COLUMN tự động), init_schema.py
+│   ├── monitoring/                   # collect_errors.py & normalize_errors.py -> gom lỗi vào monitoring.error_records (JSONB)
 │   └── validate/                     # validate_source.py & validate_target.py
 │
 ├── tests/                            # 20 bài kiểm thử (Unit + Live PostgreSQL Integration)
@@ -135,7 +141,7 @@ etl_ecommerce_data/
 │   ├── dbt_project.yml               # Cấu hình schema silver/gold, pre-hook timeout, store_failures -> test_failures
 │   ├── packages.yml                  # Khai báo dbt-labs/dbt_utils
 │   ├── profiles.yml                  # Kết nối PostgreSQL (threads: 4, connect_timeout: 60)
-│   ├── macros/                       # generate_schema_name.sql, unique_combination.sql
+│   ├── macros/                       # generate_schema_name.sql, unique_combination.sql, full_row_tests.sql
 │   ├── snapshots/snp_sellers.sql     # SCD Type 2 theo dõi thay đổi vị trí người bán
 │   ├── models/staging/               # sources.yml, schema.yml & 7 model stg_* (dedup + incremental merge)
 │   ├── models/marts/                 # schema.yml, 5 Dimensions & 2 Facts (fact_orders, fact_sales)
@@ -307,9 +313,11 @@ Dự án áp dụng khung kiểm thử chất lượng 4 tầng kết hợp ki�
 | **3. Gold Schema** | `marts,test_type:generic` | Kiểm tra duy nhất Surrogate Keys và ràng buộc khóa ngoại (`relationships`) giữa Fact và toàn bộ Dimensions. | [dbt_transform/models/marts/schema.yml](file:///d:/code/personal_project/etl_ecommerce_data/dbt_transform/models/marts/schema.yml) |
 | **4. Gold Business Rules** | 6 singular tests (`assert_*.sql`) | Đối chiếu doanh thu & số lượng item giữa `fact_orders` và `fact_sales`, kiểm tra thứ tự ngày đơn hàng, giá/phí không âm, điểm review 1–5. | [dbt_transform/tests/](file:///d:/code/personal_project/etl_ecommerce_data/dbt_transform/tests/) |
 
-Bất kỳ bản ghi nào vi phạm test dbt đều được tự động lưu vào schema `test_failures` trên PostgreSQL (cấu hình `+store_failures: true` trong [dbt_transform/dbt_project.yml](file:///d:/code/personal_project/etl_ecommerce_data/dbt_transform/dbt_project.yml#L34-L37)).
+Bất kỳ bản ghi nào vi phạm test dbt đều được ghi toàn bộ dòng (`select *`) vào schema `test_failures` (cấu hình `+store_failures: true` trong [dbt_transform/dbt_project.yml](file:///d:/code/personal_project/etl_ecommerce_data/dbt_transform/dbt_project.yml#L34-L37)) và được [collect_errors.py](file:///d:/code/personal_project/etl_ecommerce_data/src/monitoring/collect_errors.py) chuẩn hóa (kèm `run_id`, `layer`, `table_name`, `test_name`, `column_name`, `error_reason`, `severity`, `row_data JSONB`) để đổ tập trung về bảng **`monitoring.error_records`**.
 
-Chạy toàn bộ bộ kiểm thử tự động Python (20 test cases gồm Unit Tests, DAG AST, Crash/Resume & Live PostgreSQL Integration):
+Các task `collect_*_errors` trong Airflow sử dụng `trigger_rule="all_done"` nên luôn thu thập đủ dữ liệu lỗi ngay cả khi `dbt test` thất bại, sau đó `*_quality_gate` mới kiểm tra ngưỡng `severity = 'error'` để quyết định cho phép chạy tiếp hay dừng DAG.
+
+Chạy toàn bộ bộ kiểm thử tự động Python (Unit Tests, DAG AST, Crash/Resume & Live PostgreSQL Integration):
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
@@ -319,7 +327,14 @@ Chạy toàn bộ bộ kiểm thử tự động Python (20 test cases gồm Uni
 
 ## 10. Monitoring and Logging
 
-- **Airflow Web UI (`http://localhost:8080`)**: Giám sát trực quan trạng thái từng bảng/model qua 4 `TaskGroup` (`extract_load_bronze`, `dbt_silver`, `dbt_gold`, `dbt_test_business_rules`) và 10 task độc lập.
+- **Airflow Web UI (`http://localhost:8080`)**: Giám sát trực quan trạng thái từng bảng/model qua 4 `TaskGroup` (`extract_load_bronze`, `dbt_silver`, `dbt_gold`, `dbt_test_business_rules`), 3 nhánh Collector + Quality Gate và các task kiểm tra kết nối/khởi tạo.
+- **Data Quality Monitoring (`monitoring.error_records`)**: Truy vấn tập trung toàn bộ lỗi của cả 3 tầng bằng 1 bảng duy nhất:
+  ```sql
+  SELECT layer, table_name, test_name, severity, error_reason, COUNT(*) AS total_errors
+  FROM monitoring.error_records
+  GROUP BY layer, table_name, test_name, severity, error_reason
+  ORDER BY total_errors DESC;
+  ```
 - **Webhook Alerting ([alert.py](file:///d:/code/personal_project/etl_ecommerce_data/src/core/alert.py) & [olist_medallion_elt.py](file:///d:/code/personal_project/etl_ecommerce_data/airflow/dags/olist_medallion_elt.py#L60-L91))**: Gửi thông báo qua Slack/Discord khi task Airflow thất bại sau các lần retry (`on_failure_callback`).
 - **Hệ thống Log & Metadata tách tầng**:
   - [logs/pipeline.log](file:///d:/code/personal_project/etl_ecommerce_data/logs/pipeline.log): Log Extract & Load chuẩn UTC (`RotatingFileHandler`).
@@ -331,8 +346,8 @@ Chạy toàn bộ bộ kiểm thử tự động Python (20 test cases gồm Uni
 
 ## 11. Results
 
-- Pipeline vận hành hoàn chỉnh end-to-end từ SQL Server qua PostgreSQL Data Warehouse với đầy đủ 5 schema mục tiêu: `bronze`, `etl_metadata`, `silver`, `gold`, và `test_failures`.
-- Bộ kiểm thử Python cục bộ đạt **`20/20` tests passed** (bao gồm kiểm chứng crash recovery `IN_PROGRESS` -> resume `>= watermark`, ACID chunk rollback, và Schema Evolution trực tiếp trên PostgreSQL).
+- Pipeline vận hành hoàn chỉnh end-to-end từ SQL Server qua PostgreSQL Data Warehouse với đầy đủ 6 schema mục tiêu: `bronze`, `etl_metadata`, `silver`, `gold`, `test_failures`, và `monitoring` (`monitoring.error_records`).
+- Bộ kiểm thử Python cục bộ kiểm chứng đầy đủ Unit Tests, cấu trúc DAG `TaskGroup`, crash recovery `IN_PROGRESS` -> resume `>= watermark`, ACID chunk rollback, Schema Evolution và collector `monitoring.error_records` + Quality Gate trực tiếp trên PostgreSQL.
 - Workflow [GitHub Actions CI](file:///d:/code/personal_project/etl_ecommerce_data/.github/workflows/ci.yml) tự động kiểm tra 3 job: `python-unit-tests` (kèm service `postgres:16`), `dbt-validation` (bootstrap Bronze + chạy/test đầy đủ Medallion trên `postgres:16`), và `docker-build`.
 - Dữ liệu tầng `gold` sẵn sàng cho truy vấn phân tích BI, ví dụ:
 

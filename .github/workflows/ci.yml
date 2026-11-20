@@ -105,7 +105,7 @@ jobs:
       - name: Install dbt & Postgres Client
         run: |
           python -m pip install --upgrade pip
-          pip install dbt-postgres==1.11.0 psycopg2-binary
+          pip install dbt-postgres==1.11.0 psycopg2-binary sqlalchemy python-dotenv pyyaml
 
       - name: Bootstrap Bronze Schema in PostgreSQL 16
         run: |
@@ -117,21 +117,23 @@ jobs:
           with conn.cursor() as cur:
               cur.execute(ddl)
           conn.close()
-          print('Bootstrapped bronze schema in Postgres 16.')
+          print('Bootstrapped bronze & monitoring schemas in Postgres 16.')
           "
 
-      - name: Build & Test dbt Medallion Pipeline on Live PostgreSQL 16
+      - name: Build, Test & Collect Errors on Live PostgreSQL 16
         run: |
-          cd dbt_transform
-          dbt deps
-          dbt parse --no-partial-parse
-          dbt test --select source:*
-          dbt run --select staging --full-refresh
-          dbt test --select staging --exclude source:*
-          dbt snapshot
-          dbt run --select marts --full-refresh
-          dbt test --select marts,test_type:generic
-          dbt test --select test_type:singular
+          RUN_ID="ci_${GITHUB_RUN_ID:-local}"
+          (cd dbt_transform && dbt deps && dbt parse --no-partial-parse)
+          (cd dbt_transform && dbt test --select source:* --target-path /tmp/dbt_test_bronze_source)
+          python -m src.monitoring.collect_errors --collect --quality-gate --layer bronze --run-id "$RUN_ID" --target-dir /tmp/dbt_test_bronze_source
+          (cd dbt_transform && dbt run --select staging --full-refresh)
+          (cd dbt_transform && dbt test --select staging --exclude source:* --target-path /tmp/dbt_test_silver)
+          python -m src.monitoring.collect_errors --collect --quality-gate --layer silver --run-id "$RUN_ID" --target-dir /tmp/dbt_test_silver
+          (cd dbt_transform && dbt snapshot)
+          (cd dbt_transform && dbt run --select marts --full-refresh)
+          (cd dbt_transform && dbt test --select marts,test_type:generic --target-path /tmp/dbt_test_gold_schema)
+          (cd dbt_transform && dbt test --select test_type:singular --target-path /tmp/dbt_test_business_rules)
+          python -m src.monitoring.collect_errors --collect --quality-gate --layer gold --run-id "$RUN_ID" --target-dir /tmp/dbt_test_gold_schema /tmp/dbt_test_business_rules
 
   docker-build:
     name: Docker Container Image Build
