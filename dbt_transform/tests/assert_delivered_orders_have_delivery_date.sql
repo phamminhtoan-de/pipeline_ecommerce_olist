@@ -3,10 +3,7 @@
     error_if = '> 10'
 ) }}
 
-select
-    order_id,
-    order_status,
-    delivered_date_key
+select *
 from {{ ref('fact_orders') }}
 where order_status = 'delivered'
   and (delivered_date_key is null or delivered_date_key < 0)

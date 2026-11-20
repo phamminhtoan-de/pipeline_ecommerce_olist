@@ -1,8 +1,4 @@
-select
-    order_id,
-    purchase_date_key,
-    approved_date_key,
-    delivered_date_key
+select *
 from {{ ref('fact_orders') }}
 where purchase_date_key > 0
   and (

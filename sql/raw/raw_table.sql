@@ -113,3 +113,21 @@ CREATE TABLE IF NOT EXISTS {schema}._etl_run_history (
     recorded_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (batch_id, logical_name)
 );
+
+CREATE SCHEMA IF NOT EXISTS monitoring;
+
+CREATE TABLE IF NOT EXISTS monitoring.error_records (
+    error_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    run_id VARCHAR(255) NOT NULL,
+    layer VARCHAR(20) NOT NULL CHECK (layer IN ('bronze', 'silver', 'gold')),
+    table_name VARCHAR(255) NOT NULL,
+    test_name VARCHAR(255) NOT NULL,
+    column_name VARCHAR(255),
+    error_reason TEXT NOT NULL,
+    severity VARCHAR(20) NOT NULL DEFAULT 'error',
+    row_data JSONB NOT NULL,
+    detected_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_error_records_run_layer ON monitoring.error_records (run_id, layer);
+CREATE INDEX IF NOT EXISTS idx_error_records_layer_table ON monitoring.error_records (layer, table_name);

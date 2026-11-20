@@ -68,6 +68,8 @@ TGT_DB_SCHEMA = os.getenv("TGT_DB_SCHEMA", "bronze")
 CHECKPOINT_SCHEMA = os.getenv("CHECKPOINT_SCHEMA", "etl_metadata")
 CHECKPOINT_TABLE = os.getenv("CHECKPOINT_TABLE", "_pipeline_checkpoints")
 CHUNK_LOG_TABLE = os.getenv("CHUNK_LOG_TABLE", "_pipeline_chunk_checkpoints")
+MONITORING_SCHEMA = os.getenv("MONITORING_SCHEMA", "monitoring")
+ERROR_RECORDS_TABLE = os.getenv("ERROR_RECORDS_TABLE", "error_records")
 
 TGT_SQLALCHEMY_URI = (
     f"postgresql+psycopg2://{TGT_DB_USER}:{quote_plus(TGT_DB_PASSWORD or '')}@{TGT_DB_HOST}:{TGT_DB_PORT}/{TGT_DB_NAME}"
